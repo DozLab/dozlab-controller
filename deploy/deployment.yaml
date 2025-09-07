@@ -1,0 +1,151 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dozlab-controller
+  namespace: dozlab-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dozlab-controller-role
+rules:
+- apiGroups: [""]
+  resources: ["pods", "services"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["dozlab.io"]
+  resources: ["labsessions"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["dozlab.io"]
+  resources: ["labsessions/status", "labsessions/finalizers"]
+  verbs: ["get", "update", "patch"]
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["get", "list", "create", "update", "patch", "watch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dozlab-controller-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: dozlab-controller-role
+subjects:
+- kind: ServiceAccount
+  name: dozlab-controller
+  namespace: dozlab-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dozlab-controller
+  namespace: dozlab-system
+  labels:
+    app: dozlab-controller
+spec:
+  replicas: 3  # High availability with 3 replicas
+  selector:
+    matchLabels:
+      app: dozlab-controller
+  template:
+    metadata:
+      labels:
+        app: dozlab-controller
+    spec:
+      serviceAccountName: dozlab-controller
+      securityContext:
+        runAsNonRoot: true
+      containers:
+      - name: controller
+        image: dozlab-controller:latest
+        imagePullPolicy: Always
+        command:
+        - /manager
+        args:
+        - --leader-elect=true
+        - --metrics-bind-address=:8080
+        - --health-probe-bind-address=:8081
+        env:
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        ports:
+        - name: metrics
+          containerPort: 8080
+          protocol: TCP
+        - name: health
+          containerPort: 8081
+          protocol: TCP
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: health
+          initialDelaySeconds: 15
+          periodSeconds: 20
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: health
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 1
+        resources:
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+      terminationGracePeriodSeconds: 10
+      # Spread pods across nodes for better availability
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - dozlab-controller
+              topologyKey: kubernetes.io/hostname
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dozlab-controller-metrics
+  namespace: dozlab-system
+  labels:
+    app: dozlab-controller
+spec:
+  ports:
+  - name: metrics
+    port: 8080
+    targetPort: metrics
+  - name: health
+    port: 8081
+    targetPort: health
+  selector:
+    app: dozlab-controller
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dozlab-system
+  labels:
+    name: dozlab-system
