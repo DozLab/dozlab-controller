@@ -20,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
@@ -85,7 +86,7 @@ func (r *LabSessionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		}
 		log.Error(err, "Failed to get LabSession after retries")
 		return ctrl.Result{RequeueAfter: r.calculateRetryDelay(1)}, err
-	}"
+	}
 
 	// Handle deletion
 	if labSession.GetDeletionTimestamp() != nil {
@@ -123,7 +124,6 @@ func (r *LabSessionReconciler) reconcileLabSession(ctx context.Context, labSessi
 	}
 
 	// STORAGE: Create PVCs first to ensure persistent storage
-	sessionID, _ := getNestedString(labSession.Object, "spec", "sessionId")
 	if sessionID != "" {
 		err := r.reconcilePVCs(ctx, labSession, sessionID)
 		if err != nil {
@@ -601,20 +601,6 @@ func (r *LabSessionReconciler) updateLabSessionStatus(ctx context.Context, labSe
 	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 }
 
-func (r *LabSessionReconciler) reconcileDelete(ctx context.Context, labSession *unstructured.Unstructured) (ctrl.Result, error) {
-	log := log.FromContext(ctx)
-	log.Info("Deleting LabSession resources")
-
-	// Update status to Terminating
-	r.updateStatus(ctx, labSession, "Terminating", "Cleaning up lab session resources", nil)
-
-	// The owned resources (pod, service) will be automatically deleted by Kubernetes
-	// due to owner references. We just need to remove our finalizer.
-
-	controllerutil.RemoveFinalizer(labSession, LabSessionFinalizer)
-	return ctrl.Result{}, r.Update(ctx, labSession)
-}
-
 // Helper functions
 
 func (r *LabSessionReconciler) getStatusField(labSession *unstructured.Unstructured, field string) string {
@@ -903,7 +889,7 @@ func getNestedString(obj map[string]interface{}, fields ...string) (string, bool
 }
 
 // SetupWithManager sets up the controller with the Manager
-func (r *LabSessionReconciler) SetupWithManager(mgr ctrl.Manager) error {
+func (r *LabSessionReconciler) SetupWithManager(mgr ctrl.Manager, maxConcurrentReconciles int) error {
 	// Initialize controller with proper defaults (following dozlab-api initialization pattern)
 	if r.MaxRetries == 0 {
 		r.MaxRetries = MaxRetryAttempts
@@ -914,7 +900,7 @@ func (r *LabSessionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.statusUpdateMutex == nil {
 		r.statusUpdateMutex = make(map[string]*sync.Mutex)
 	}
-	
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&unstructured.Unstructured{}).
 		WithEventFilter(predicate.NewPredicateFuncs(func(obj client.Object) bool {
@@ -922,6 +908,9 @@ func (r *LabSessionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			gvk := obj.GetObjectKind().GroupVersionKind()
 			return gvk.Group == "dozlab.io" && gvk.Kind == "LabSession"
 		})).
+		WithOptions(controller.Options{
+			MaxConcurrentReconciles: maxConcurrentReconciles,
+		}).
 		Complete(r)
 }
 
@@ -952,7 +941,7 @@ func (r *LabSessionReconciler) reconcilePVCs(ctx context.Context, labSession *un
 				AccessModes: []corev1.PersistentVolumeAccessMode{
 					corev1.ReadWriteOnce,
 				},
-				Resources: corev1.ResourceRequirements{
+				Resources: corev1.VolumeResourceRequirements{
 					Requests: corev1.ResourceList{
 						corev1.ResourceStorage: resource.MustParse(pvcSpec.size),
 					},
