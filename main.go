@@ -15,6 +15,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -56,6 +57,11 @@ func main() {
 	var probeAddr string
 	var secureMetrics bool
 	var enableHTTP2 bool
+	var watchNamespace string
+	var syncPeriod time.Duration
+	var cacheSyncTimeout time.Duration
+	var maxConcurrentReconciles int
+	var gracefulShutdownTimeout time.Duration
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -66,6 +72,16 @@ func main() {
 		"If set the metrics endpoint is served securely")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	flag.StringVar(&watchNamespace, "namespace", "",
+		"Namespace to watch for LabSession resources. If empty, watches all namespaces.")
+	flag.DurationVar(&syncPeriod, "sync-period", 10*time.Minute,
+		"Minimum sync period for controller reconciliation (default: 10 minutes)")
+	flag.DurationVar(&cacheSyncTimeout, "cache-sync-timeout", 2*time.Minute,
+		"Timeout for initial cache sync (default: 2 minutes)")
+	flag.IntVar(&maxConcurrentReconciles, "max-concurrent-reconciles", 10,
+		"Maximum number of concurrent reconciles (default: 10)")
+	flag.DurationVar(&gracefulShutdownTimeout, "graceful-shutdown-timeout", 30*time.Second,
+		"Timeout for graceful shutdown (default: 30 seconds)")
 	
 	opts := zap.Options{
 		Development: true,
@@ -95,7 +111,9 @@ func main() {
 		TLSOpts: tlsOpts,
 	})
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	// Configure cache settings for optimal performance
+	// Cache only necessary resources to reduce memory overhead
+	cacheOpts := ctrl.Options{
 		Scheme: scheme,
 		Metrics: server.Options{
 			BindAddress:   metricsAddr,
@@ -105,7 +123,15 @@ func main() {
 		WebhookServer:          webhookServer,
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
-		LeaderElectionID:       "8c45b896.dozlab.io",
+		LeaderElectionID:       "dozlab-controller-leader-election",
+		// Cache configuration with sync period
+		Cache: cache.Options{
+			// Sync period: minimum time between reconciliation cycles
+			// Prevents excessive reconciliation, reducing API server load
+			SyncPeriod: &syncPeriod,
+		},
+		// Graceful shutdown timeout for clean termination
+		GracefulShutdownTimeout: &gracefulShutdownTimeout,
 		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
 		// when the Manager ends. This requires the binary to immediately end when the
 		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly
@@ -117,9 +143,18 @@ func main() {
 		// if you are doing or is intended to do any operation such as perform cleanups
 		// after the manager stops then its usage might be unsafe.
 		// LeaderElectionReleaseOnCancel: true,
+	}
 
-		// Additional manager options can be set here if needed
-	})
+	// If watching a specific namespace, configure cache to only watch that namespace
+	// This significantly reduces memory footprint and API server load
+	if watchNamespace != "" {
+		setupLog.Info("watching specific namespace", "namespace", watchNamespace)
+		cacheOpts.Cache.DefaultNamespaces = map[string]cache.Config{
+			watchNamespace: {},
+		}
+	}
+
+	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), cacheOpts)
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
@@ -128,7 +163,7 @@ func main() {
 	if err = (&controllers.LabSessionReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
+	}).SetupWithManager(mgr, maxConcurrentReconciles); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "LabSession")
 		os.Exit(1)
 	}
@@ -151,7 +186,26 @@ func main() {
 		os.Exit(1)
 	}
 
-	setupLog.Info("starting manager")
+	// Add custom readiness check for cache sync (following dozlab-api pattern)
+	// This ensures the controller is only marked ready after cache is fully synchronized
+	if err := mgr.AddReadyzCheck("cache-sync", func(req *http.Request) error {
+		ctx, cancel := context.WithTimeout(req.Context(), cacheSyncTimeout)
+		defer cancel()
+		if !mgr.GetCache().WaitForCacheSync(ctx) {
+			return fmt.Errorf("cache not synced within timeout (%v)", cacheSyncTimeout)
+		}
+		return nil
+	}); err != nil {
+		setupLog.Error(err, "unable to set up cache sync check")
+		os.Exit(1)
+	}
+
+	setupLog.Info("starting manager",
+		"sync-period", syncPeriod,
+		"max-concurrent-reconciles", maxConcurrentReconciles,
+		"cache-sync-timeout", cacheSyncTimeout,
+		"graceful-shutdown-timeout", gracefulShutdownTimeout,
+		"watch-namespace", watchNamespace)
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)

@@ -65,6 +65,11 @@ spec:
         - --leader-elect=true
         - --metrics-bind-address=:8080
         - --health-probe-bind-address=:8081
+        # Performance optimizations from dozlab-api reference
+        - --max-concurrent-reconciles=10
+        - --sync-period=10m
+        - --cache-sync-timeout=2m
+        - --graceful-shutdown-timeout=30s
         env:
         - name: POD_NAMESPACE
           valueFrom:
@@ -110,7 +115,8 @@ spec:
           capabilities:
             drop:
             - ALL
-      terminationGracePeriodSeconds: 10
+      # Increased from 10s to match graceful-shutdown-timeout for clean termination
+      terminationGracePeriodSeconds: 30
       # Spread pods across nodes for better availability
       affinity:
         podAntiAffinity:
