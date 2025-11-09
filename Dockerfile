@@ -11,8 +11,8 @@ RUN go mod download
 # Copy the source code
 COPY . .
 
-# Build the manager binary
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -o manager main.go
+# Build the manager binary from new cmd structure
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -o manager cmd/controller/main.go
 
 # Use distroless as minimal base image
 FROM gcr.io/distroless/static:nonroot
