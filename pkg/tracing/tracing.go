@@ -7,12 +7,14 @@ import (
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/exporters/jaeger"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/sdk/resource"
 	"go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/semconv/v1.17.0"
 	oteltrace "go.opentelemetry.io/otel/trace"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 const (
@@ -33,7 +35,9 @@ const (
 // TracingConfig holds tracing configuration (following dozlab-api config patterns)
 type TracingConfig struct {
 	Enabled         bool
-	JaegerEndpoint  string
+	// OTLPEndpoint is the full OTLP/HTTP traces URL, e.g. http://jaeger:4318/v1/traces.
+	// When empty, the standard OTEL_EXPORTER_OTLP_* environment variables apply.
+	OTLPEndpoint    string
 	ServiceName     string
 	ServiceVersion  string
 	SampleRate      float64
@@ -55,12 +59,14 @@ func NewTracer(config TracingConfig) (*Tracer, error) {
 		}, nil
 	}
 
-	// Create Jaeger exporter
-	exporter, err := jaeger.New(
-		jaeger.WithCollectorEndpoint(jaeger.WithEndpoint(config.JaegerEndpoint)),
-	)
+	// Create OTLP exporter (Jaeger and most collectors accept OTLP natively)
+	var exporterOpts []otlptracehttp.Option
+	if config.OTLPEndpoint != "" {
+		exporterOpts = append(exporterOpts, otlptracehttp.WithEndpointURL(config.OTLPEndpoint))
+	}
+	exporter, err := otlptracehttp.New(context.Background(), exporterOpts...)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Jaeger exporter: %w", err)
+		return nil, fmt.Errorf("failed to create OTLP exporter: %w", err)
 	}
 
 	// Create resource
@@ -191,17 +197,14 @@ func RecordError(span oteltrace.Span, err error, errorType string) {
 			attribute.String(AttrErrorType, errorType),
 			attribute.Bool("error", true),
 		)
-		span.SetStatus(oteltrace.Status{
-			Code:        oteltrace.StatusCodeError,
-			Description: err.Error(),
-		})
+		span.SetStatus(codes.Error, err.Error())
 	}
 }
 
 // RecordSuccess marks a span as successful
 func RecordSuccess(span oteltrace.Span) {
 	span.SetAttributes(attribute.Bool("success", true))
-	span.SetStatus(oteltrace.Status{Code: oteltrace.StatusCodeOk})
+	span.SetStatus(codes.Ok, "")
 }
 
 // AddSessionContext adds session context to a span
@@ -223,12 +226,12 @@ func AddResourceContext(span oteltrace.Span, kind, namespace, name string) {
 
 // TracedReconciler wraps a reconciler with tracing (following dozlab-api wrapper patterns)
 type TracedReconciler struct {
-	reconciler ctrl.Reconciler
+	reconciler reconcile.Reconciler
 	tracer     *Tracer
 }
 
 // NewTracedReconciler creates a reconciler wrapper with tracing
-func NewTracedReconciler(reconciler ctrl.Reconciler, tracer *Tracer) *TracedReconciler {
+func NewTracedReconciler(reconciler reconcile.Reconciler, tracer *Tracer) *TracedReconciler {
 	return &TracedReconciler{
 		reconciler: reconciler,
 		tracer:     tracer,
