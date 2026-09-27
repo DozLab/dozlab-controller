@@ -22,6 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	"dozlab-controller/internal/controller"
+	"dozlab-controller/internal/events"
 )
 
 var (
@@ -43,6 +44,7 @@ func main() {
 	var cacheSyncTimeout time.Duration
 	var maxConcurrentReconciles int
 	var gracefulShutdownTimeout time.Duration
+	var rabbitMQURL string
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -59,6 +61,10 @@ func main() {
 		"Maximum number of concurrent reconciles (default: 10)")
 	flag.DurationVar(&gracefulShutdownTimeout, "graceful-shutdown-timeout", 30*time.Second,
 		"Timeout for graceful shutdown (default: 30 seconds)")
+
+	flag.StringVar(&rabbitMQURL, "rabbitmq-url", os.Getenv("RABBITMQ_URL"),
+		"AMQP URL of the event bus broker (default $RABBITMQ_URL). When set, LabSession phase "+
+			"changes are published to the dozlab.events exchange; when empty, publishing is off.")
 
 	var podSettings controller.PodSettings
 	podSettings.BindFlags(flag.CommandLine)
@@ -110,12 +116,25 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Phase change events (optional): the publisher connects lazily, so a broker
+	// outage delays events but never blocks reconciliation.
+	var phaseEvents events.Publisher
+	if rabbitMQURL != "" {
+		publisher := events.NewRabbitPublisher(rabbitMQURL)
+		defer publisher.Close()
+		phaseEvents = publisher
+		setupLog.Info("publishing LabSession phase changes", "exchange", events.ExchangeName)
+	} else {
+		setupLog.Info("RABBITMQ_URL not set; LabSession phase changes are not published")
+	}
+
 	// Setup controller with optimizations
 	if err = (&controller.LabSessionReconciler{
 		Client:          mgr.GetClient(),
 		Scheme:          mgr.GetScheme(),
 		Recorder:        mgr.GetEventRecorderFor("dozlab-controller"),
 		ResourceBuilder: controller.NewResourceBuilder(podSettings),
+		Events:          phaseEvents,
 	}).SetupWithManager(mgr, maxConcurrentReconciles); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "LabSession")
 		os.Exit(1)

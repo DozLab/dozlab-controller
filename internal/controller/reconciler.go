@@ -17,10 +17,21 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	"dozlab-controller/internal/events"
 )
 
 const (
 	LabSessionFinalizer = "labsession.dozlab.io/finalizer"
+
+	// PublishedPhaseAnnotation records the last phase published to the event bus,
+	// so each phase is published once even across controller restarts.
+	PublishedPhaseAnnotation = "dozlab.io/published-phase"
+
+	// publishRetryDelay is how soon a failed phase publish is retried.
+	publishRetryDelay = 30 * time.Second
+	// terminatingPublishTimeout bounds the best-effort publish during deletion.
+	terminatingPublishTimeout = 5 * time.Second
 )
 
 // LabSessionReconciler reconciles a LabSession object
@@ -29,6 +40,8 @@ type LabSessionReconciler struct {
 	Scheme          *runtime.Scheme
 	Recorder        record.EventRecorder
 	ResourceBuilder *ResourceBuilder
+	// Events publishes phase changes to the event bus; nil disables publishing.
+	Events events.Publisher
 }
 
 // +kubebuilder:rbac:groups=dozlab.io,resources=labsessions,verbs=get;list;watch;create;update;patch;delete
@@ -69,6 +82,21 @@ func (r *LabSessionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		}
 		return ctrl.Result{Requeue: true}, nil
 	}
+
+	// Publish the phase the session is in (as stored), then run the state machine.
+	// A failed publish doesn't block reconciliation; it is retried soon.
+	publishPending := r.publishPhase(ctx, session)
+	result, err := r.reconcilePhase(ctx, session)
+	if publishPending && err == nil && !result.Requeue &&
+		(result.RequeueAfter == 0 || result.RequeueAfter > publishRetryDelay) {
+		result.RequeueAfter = publishRetryDelay
+	}
+	return result, err
+}
+
+// reconcilePhase runs the state machine for the session's current phase.
+func (r *LabSessionReconciler) reconcilePhase(ctx context.Context, session *LabSession) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
 
 	// State machine reconciliation based on current phase
 	switch session.Status.Phase {
@@ -225,6 +253,15 @@ func (r *LabSessionReconciler) reconcileDelete(ctx context.Context, session *Lab
 
 	r.Recorder.Event(session, corev1.EventTypeNormal, "Terminating", "Cleaning up lab session")
 
+	// Best effort: deletion must not wait for the broker.
+	if r.Events != nil && session.Annotations[PublishedPhaseAnnotation] != string(SessionPhaseTerminating) {
+		publishCtx, cancel := context.WithTimeout(ctx, terminatingPublishTimeout)
+		if err := r.Events.PublishPhaseChange(publishCtx, phaseChange(session)); err != nil {
+			logger.Error(err, "Failed to publish Terminating phase; continuing with deletion")
+		}
+		cancel()
+	}
+
 	// Remove finalizer
 	controllerutil.RemoveFinalizer(session, LabSessionFinalizer)
 	if err := r.Update(ctx, session); err != nil {
@@ -234,6 +271,53 @@ func (r *LabSessionReconciler) reconcileDelete(ctx context.Context, session *Lab
 
 	logger.Info("Successfully deleted LabSession")
 	return ctrl.Result{}, nil
+}
+
+// publishPhase publishes the session's current phase to the event bus if it
+// hasn't been published yet, then records it in PublishedPhaseAnnotation. The
+// phase comes from the object as read, so only persisted phases are published;
+// if the phase changes twice between reconciles, only the latest is published.
+// It reports whether publishing failed and should be retried.
+func (r *LabSessionReconciler) publishPhase(ctx context.Context, session *LabSession) bool {
+	phase := session.Status.Phase
+	if r.Events == nil || phase == "" || session.Annotations[PublishedPhaseAnnotation] == string(phase) {
+		return false
+	}
+	logger := log.FromContext(ctx)
+
+	if err := r.Events.PublishPhaseChange(ctx, phaseChange(session)); err != nil {
+		logger.Error(err, "Failed to publish phase change; will retry", "phase", phase)
+		return true
+	}
+
+	// If this patch fails the phase is published again later, with the same
+	// event ID (UID.phase), so consumers can drop the duplicate.
+	patch := client.MergeFrom(session.DeepCopy())
+	if session.Annotations == nil {
+		session.Annotations = map[string]string{}
+	}
+	session.Annotations[PublishedPhaseAnnotation] = string(phase)
+	if err := r.Patch(ctx, session, patch); err != nil {
+		logger.Error(err, "Failed to record published phase; will retry", "phase", phase)
+		return true
+	}
+	logger.Info("Published phase change", "phase", phase)
+	return false
+}
+
+// phaseChange describes the session's current phase for the event bus.
+func phaseChange(session *LabSession) events.PhaseChange {
+	return events.PhaseChange{
+		UID:       string(session.UID),
+		Namespace: session.Namespace,
+		Name:      session.Name,
+		UserID:    session.Spec.UserID,
+		SessionID: session.Spec.SessionID,
+		Phase:     string(session.Status.Phase),
+		Message:   session.Status.Message,
+		Reason:    session.Status.Reason,
+		Endpoints: session.Status.Endpoints,
+	}
 }
 
 // ensurePVCs creates PVCs if they don't exist

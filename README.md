@@ -155,6 +155,43 @@ The VM container runs as root with `NET_ADMIN`, `SYS_ADMIN` and `SYS_RESOURCE`: 
 added capabilities have no effect and the tap device / iptables setup fails. The generated pod
 matches `reference/lab-pod-working.yaml` in the DozLab workspace, which is verified to boot.
 
+### Phase change events
+
+When `--rabbitmq-url` (env `RABBITMQ_URL`) is set, the controller publishes every LabSession
+phase it stores to the DozLab event bus: the durable topic exchange `dozlab.events` (the one
+dozlab-api uses), routing key `labsession.phase_changed`, persistent, with publisher confirms.
+When it's empty, nothing is published.
+
+```json
+{
+  "id": "<metadata.uid>.Running",
+  "type": "labsession.phase_changed",
+  "source": "dozlab-controller",
+  "session_id": "<spec.sessionId>",
+  "user_id": "<spec.userId>",
+  "data": {"phase": "Running", "message": "Lab session is running", "namespace": "...", "name": "...",
+           "reason": "(Failed only)", "endpoints": {"terminal": "..."}},
+  "timestamp": "2026-09-27T22:00:00Z"
+}
+```
+
+- Each reconcile publishes the stored phase if it differs from the annotation
+  `dozlab.io/published-phase`, then sets the annotation, so a phase is published once even across
+  restarts. Only persisted phases are published; if a phase changes twice between reconciles, only
+  the latest goes out.
+- A publish that fails (broker down) doesn't block reconciliation; it's retried within 30 s. The
+  publisher reconnects on the next publish. If the annotation patch fails after a publish, the
+  phase is published again with the same `id`, so consumers can deduplicate on it.
+- `Terminating` is published once, best-effort (5 s), before the finalizer is removed: deletion
+  never waits for the broker.
+
+```bash
+RABBITMQ_URL=amqp://dozlab:<password>@rabbitmq.dozlab.svc.cluster.local:5672/ go run ./cmd/controller
+```
+
+In `deploy/deployment.yaml` the URL comes from the optional Secret `dozlab-controller-rabbitmq`
+(key `url`) in `dozlab-system`; without it the controller runs with publishing off.
+
 ## Development
 
 ### Project Structure
