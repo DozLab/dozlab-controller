@@ -28,6 +28,9 @@ type PodSettings struct {
 	SSHUser string
 	// VMDiskSize is the size the rootfs is grown to (a Kubernetes quantity).
 	VMDiskSize string
+	// StorageClass is the StorageClass for the session PVCs. Empty uses the
+	// cluster's default StorageClass.
+	StorageClass string
 }
 
 // BindFlags registers the settings as flags. Each flag defaults to its
@@ -47,6 +50,8 @@ func (s *PodSettings) BindFlags(fs *flag.FlagSet) {
 		"User the terminal sidecar logs into the VM as (env DOZLAB_SSH_USER).")
 	fs.StringVar(&s.VMDiskSize, "vm-disk-size", envOr("DOZLAB_VM_DISK_SIZE", "4Gi"),
 		"Size the VM rootfs is grown to (env DOZLAB_VM_DISK_SIZE).")
+	fs.StringVar(&s.StorageClass, "storage-class", os.Getenv("DOZLAB_STORAGE_CLASS"),
+		"StorageClass for session PVCs (env DOZLAB_STORAGE_CLASS). Empty uses the cluster default.")
 }
 
 // Validate reports missing or malformed settings.

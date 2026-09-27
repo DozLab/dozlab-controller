@@ -426,7 +426,7 @@ func (rb *ResourceBuilder) BuildPVCs(session *LabSession) []*corev1.PersistentVo
 						corev1.ResourceStorage: resource.MustParse(storageSize),
 					},
 				},
-				StorageClassName: stringPtr("default"),
+				StorageClassName: rb.storageClassName(),
 			},
 		},
 		{
@@ -447,12 +447,21 @@ func (rb *ResourceBuilder) BuildPVCs(session *LabSession) []*corev1.PersistentVo
 						corev1.ResourceStorage: resource.MustParse("5Gi"),
 					},
 				},
-				StorageClassName: stringPtr("default"),
+				StorageClassName: rb.storageClassName(),
 			},
 		},
 	}
 
 	return pvcs
+}
+
+// storageClassName returns the configured StorageClass, or nil so the cluster
+// default is used
+func (rb *ResourceBuilder) storageClassName() *string {
+	if rb.settings.StorageClass == "" {
+		return nil
+	}
+	return stringPtr(rb.settings.StorageClass)
 }
 
 // getResourceLimits returns resource limits with defaults and max enforcement
