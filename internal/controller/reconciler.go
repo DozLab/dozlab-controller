@@ -145,30 +145,20 @@ func (r *LabSessionReconciler) reconcileCreating(ctx context.Context, session *L
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, err
 	}
 
-	// Step 2: Wait for PVCs to be bound
-	pvcsReady, err := r.checkPVCsReady(ctx, session)
-	if err != nil {
-		logger.Error(err, "Failed to check PVC status")
-		return ctrl.Result{RequeueAfter: 10 * time.Second}, err
-	}
-	if !pvcsReady {
-		logger.Info("Waiting for PVCs to be bound")
-		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
-	}
-
-	// Step 3: Create Pod
+	// Step 2: Create Pod. Don't wait for the PVCs to be bound first: with a
+	// WaitForFirstConsumer StorageClass they only bind once this pod is scheduled.
 	if err := r.ensurePod(ctx, session); err != nil {
 		r.updateStatusFailed(ctx, session, "Failed to create Pod", err)
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, err
 	}
 
-	// Step 4: Create Service
+	// Step 3: Create Service
 	if err := r.ensureService(ctx, session); err != nil {
 		r.updateStatusFailed(ctx, session, "Failed to create Service", err)
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, err
 	}
 
-	// Step 5: Check if pod is running
+	// Step 4: Check if pod is running
 	podReady, podIP, err := r.checkPodReady(ctx, session)
 	if err != nil {
 		logger.Error(err, "Failed to check pod status")
@@ -346,28 +336,6 @@ func (r *LabSessionReconciler) ensurePVCs(ctx context.Context, session *LabSessi
 	}
 
 	return nil
-}
-
-// checkPVCsReady checks if all PVCs are bound
-func (r *LabSessionReconciler) checkPVCsReady(ctx context.Context, session *LabSession) (bool, error) {
-	sessionID := session.Spec.SessionID
-	pvcNames := []string{
-		fmt.Sprintf("vm-data-%s", sessionID),
-		fmt.Sprintf("vscode-data-%s", sessionID),
-	}
-
-	for _, pvcName := range pvcNames {
-		pvc := &corev1.PersistentVolumeClaim{}
-		err := r.Get(ctx, types.NamespacedName{Name: pvcName, Namespace: session.Namespace}, pvc)
-		if err != nil {
-			return false, err
-		}
-		if pvc.Status.Phase != corev1.ClaimBound {
-			return false, nil
-		}
-	}
-
-	return true, nil
 }
 
 // ensurePod creates a pod if it doesn't exist

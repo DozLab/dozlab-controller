@@ -288,6 +288,25 @@ func TestBuildPVCs(t *testing.T) {
 	}
 }
 
+func TestBuildPVCsStorageClass(t *testing.T) {
+	session := newSession(LabSessionSpec{UserID: "u1", SessionID: "s1"})
+
+	// Unset: nil, so the cluster's default StorageClass is used
+	for _, pvc := range NewResourceBuilder(testSettings).BuildPVCs(session) {
+		if pvc.Spec.StorageClassName != nil {
+			t.Errorf("%s storage class = %q, want nil", pvc.Name, *pvc.Spec.StorageClassName)
+		}
+	}
+
+	settings := testSettings
+	settings.StorageClass = "local-path"
+	for _, pvc := range NewResourceBuilder(settings).BuildPVCs(session) {
+		if pvc.Spec.StorageClassName == nil || *pvc.Spec.StorageClassName != "local-path" {
+			t.Errorf("%s storage class = %v, want local-path", pvc.Name, pvc.Spec.StorageClassName)
+		}
+	}
+}
+
 func checkQuantity(t *testing.T, what string, got resource.Quantity, want string) {
 	t.Helper()
 	if got.Cmp(resource.MustParse(want)) != 0 {

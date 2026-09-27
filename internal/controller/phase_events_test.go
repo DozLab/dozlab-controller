@@ -53,9 +53,10 @@ func newPhaseTestReconciler(t *testing.T, pub events.Publisher, objs ...*LabSess
 		builder = builder.WithObjects(o)
 	}
 	r := &LabSessionReconciler{
-		Client:   builder.Build(),
-		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(100),
+		Client:          builder.Build(),
+		Scheme:          scheme,
+		Recorder:        record.NewFakeRecorder(100),
+		ResourceBuilder: NewResourceBuilder(testSettings),
 	}
 	if pub != nil {
 		r.Events = pub
@@ -121,7 +122,7 @@ func TestReconcilePublishesEachStoredPhase(t *testing.T) {
 	if got := r.getSession(t).Status.Phase; got != SessionPhaseCreating {
 		t.Fatalf("phase = %s, want Creating", got)
 	}
-	// Creating then tries to create PVCs (fine on the fake client) and waits for them to bind.
+	// Creating then creates the PVCs, pod and service on the fake client and waits for the pod.
 	if _, err := r.Reconcile(context.Background(), testRequest); err != nil {
 		t.Fatal(err)
 	}

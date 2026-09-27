@@ -132,6 +132,7 @@ at startup if any is missing.
 | `--ssh-key-secret-key` | `DOZLAB_SSH_KEY_SECRET_KEY` | `id_ed25519` | Key inside that Secret |
 | `--ssh-user` | `DOZLAB_SSH_USER` | `root` | User the terminal sidecar logs into the VM as |
 | `--vm-disk-size` | `DOZLAB_VM_DISK_SIZE` | `4Gi` | Size the rootfs is grown to; the `vm-kernels` volume is sized at twice this |
+| `--storage-class` | `DOZLAB_STORAGE_CLASS` | cluster default | StorageClass for the session PVCs |
 
 A LabSession's `customImages.initrdImage` / `terminalImage` override the VM and terminal
 images for that session.
