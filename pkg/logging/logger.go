@@ -215,7 +215,11 @@ func NewReconcileLogger(name, namespace, resourceName string) *ReconcileLogger {
 // StartReconcile logs the start of a reconciliation
 func (rl *ReconcileLogger) StartReconcile(ctx context.Context) *ReconcileLogger {
 	rl.InfoWithContext(ctx, "Starting reconciliation")
-	return rl.WithContext(ctx).(*ReconcileLogger)
+	return &ReconcileLogger{
+		Logger:    rl.WithContext(ctx),
+		namespace: rl.namespace,
+		name:      rl.name,
+	}
 }
 
 // EndReconcile logs the end of a reconciliation
