@@ -79,6 +79,14 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.name
+        # Lab pod images (required; see README "Lab pod settings"). These are local
+        # builds; replace them with registry images once they are published.
+        - name: DOZLAB_VM_IMAGE
+          value: dozlab-firecracker:local
+        - name: DOZLAB_INIT_IMAGE
+          value: dozlab-init:local
+        - name: DOZLAB_TERMINAL_IMAGE
+          value: dozlab-terminal:local
         ports:
         - name: metrics
           containerPort: 8080

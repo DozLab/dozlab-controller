@@ -1,11 +1,22 @@
 package controller
 
 import (
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
+
+var testSettings = PodSettings{
+	VMImage:         "dozlab-firecracker:test",
+	InitImage:       "dozlab-init:test",
+	TerminalImage:   "dozlab-terminal:test",
+	SSHKeySecret:    "lab-ssh-key",
+	SSHKeySecretKey: "id_ed25519",
+	SSHUser:         "root",
+	VMDiskSize:      "4Gi",
+}
 
 func newSession(spec LabSessionSpec) *LabSession {
 	s := &LabSession{Spec: spec}
@@ -49,8 +60,8 @@ func TestBuildPod(t *testing.T) {
 		{
 			name:          "defaults",
 			spec:          LabSessionSpec{UserID: "u1", SessionID: "s1"},
-			wantVMImage:   "your-initrd:latest",
-			wantTermImage: "your-terminal-sidecar:latest",
+			wantVMImage:   "dozlab-firecracker:test",
+			wantTermImage: "dozlab-terminal:test",
 			wantCodeImage: "codercom/code-server:latest",
 			wantPassword:  "changeme",
 			wantMemLimit:  "4Gi",
@@ -87,8 +98,8 @@ func TestBuildPod(t *testing.T) {
 				SessionID: "s3",
 				Resources: ResourceConfig{Memory: "64Gi", CPU: "32"},
 			},
-			wantVMImage:   "your-initrd:latest",
-			wantTermImage: "your-terminal-sidecar:latest",
+			wantVMImage:   "dozlab-firecracker:test",
+			wantTermImage: "dozlab-terminal:test",
 			wantCodeImage: "codercom/code-server:latest",
 			wantPassword:  "changeme",
 			wantMemLimit:  "16Gi",
@@ -101,7 +112,7 @@ func TestBuildPod(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			session := newSession(tt.spec)
-			pod := NewResourceBuilder().BuildPod(session)
+			pod := NewResourceBuilder(testSettings).BuildPod(session)
 
 			if want := "lab-session-" + tt.spec.SessionID; pod.Name != want {
 				t.Errorf("pod name = %q, want %q", pod.Name, want)
@@ -122,14 +133,18 @@ func TestBuildPod(t *testing.T) {
 			if pod.Spec.RestartPolicy != corev1.RestartPolicyNever {
 				t.Errorf("restart policy = %q, want Never", pod.Spec.RestartPolicy)
 			}
-			if len(pod.Spec.InitContainers) != 1 || pod.Spec.InitContainers[0].Name != "ip-calculator" {
-				t.Errorf("init containers = %v, want [ip-calculator]", pod.Spec.InitContainers)
+			var initNames []string
+			for _, c := range pod.Spec.InitContainers {
+				initNames = append(initNames, c.Name)
+			}
+			if len(initNames) != 2 || initNames[0] != "init-rootfs" || initNames[1] != "network-setup" {
+				t.Errorf("init containers = %v, want [init-rootfs network-setup]", initNames)
 			}
 			if len(pod.Spec.Containers) != 3 {
 				t.Fatalf("got %d containers, want 3", len(pod.Spec.Containers))
 			}
 
-			vm := findContainer(t, pod.Spec.Containers, "initrd-vm")
+			vm := findContainer(t, pod.Spec.Containers, "firecracker-vm")
 			if vm.Image != tt.wantVMImage {
 				t.Errorf("vm image = %q, want %q", vm.Image, tt.wantVMImage)
 			}
@@ -156,7 +171,7 @@ func TestBuildPod(t *testing.T) {
 
 			// Every PVC-backed volume must reference a claim that BuildPVCs creates.
 			claims := map[string]bool{}
-			for _, pvc := range NewResourceBuilder().BuildPVCs(session) {
+			for _, pvc := range NewResourceBuilder(testSettings).BuildPVCs(session) {
 				claims[pvc.Name] = true
 			}
 			for _, v := range pod.Spec.Volumes {
@@ -169,7 +184,7 @@ func TestBuildPod(t *testing.T) {
 }
 
 func TestBuildPodVolumeMounts(t *testing.T) {
-	pod := NewResourceBuilder().BuildPod(newSession(LabSessionSpec{UserID: "u", SessionID: "s"}))
+	pod := NewResourceBuilder(testSettings).BuildPod(newSession(LabSessionSpec{UserID: "u", SessionID: "s"}))
 
 	volumes := map[string]bool{}
 	for _, v := range pod.Spec.Volumes {
@@ -187,7 +202,7 @@ func TestBuildPodVolumeMounts(t *testing.T) {
 
 func TestBuildService(t *testing.T) {
 	session := newSession(LabSessionSpec{UserID: "u1", SessionID: "s1"})
-	svc := NewResourceBuilder().BuildService(session)
+	svc := NewResourceBuilder(testSettings).BuildService(session)
 
 	if svc.Name != "lab-service-s1" {
 		t.Errorf("service name = %q, want %q", svc.Name, "lab-service-s1")
@@ -197,7 +212,7 @@ func TestBuildService(t *testing.T) {
 	}
 
 	// The selector must match the pod's labels.
-	pod := NewResourceBuilder().BuildPod(session)
+	pod := NewResourceBuilder(testSettings).BuildPod(session)
 	for k, v := range svc.Spec.Selector {
 		if pod.Labels[k] != v {
 			t.Errorf("selector %s=%q does not match pod label %q", k, v, pod.Labels[k])
@@ -246,7 +261,7 @@ func TestBuildPVCs(t *testing.T) {
 				SessionID: "s1",
 				Resources: ResourceConfig{Storage: tt.storage},
 			})
-			pvcs := NewResourceBuilder().BuildPVCs(session)
+			pvcs := NewResourceBuilder(testSettings).BuildPVCs(session)
 			if len(pvcs) != 2 {
 				t.Fatalf("got %d PVCs, want 2", len(pvcs))
 			}
@@ -294,7 +309,7 @@ func TestGetResourceLimits(t *testing.T) {
 		{"cpu capped", ResourceConfig{CPU: "10"}, ResourceConfig{Memory: "4Gi", CPU: "8"}},
 	}
 
-	rb := NewResourceBuilder()
+	rb := NewResourceBuilder(testSettings)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result := rb.getResourceLimits(tt.input)
@@ -386,5 +401,178 @@ func TestParseCPU(t *testing.T) {
 				t.Errorf("parseCPU(%v) = %v; want %v", tt.input, result, tt.expected)
 			}
 		})
+	}
+}
+
+// TestBuildPodMatchesReference checks the fields that reference/lab-pod-working.yaml
+// marks as required to boot a Firecracker VM.
+func TestBuildPodMatchesReference(t *testing.T) {
+	pod := NewResourceBuilder(testSettings).BuildPod(newSession(LabSessionSpec{
+		UserID:    "u1",
+		SessionID: "demo",
+		RootfsURL: "https://example.test/rootfs.ext4",
+	}))
+
+	t.Run("ip_forward sysctl", func(t *testing.T) {
+		sc := pod.Spec.SecurityContext
+		if sc == nil {
+			t.Fatal("pod security context is nil")
+		}
+		found := false
+		for _, s := range sc.Sysctls {
+			if s.Name == "net.ipv4.ip_forward" && s.Value == "1" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("sysctls = %v, want net.ipv4.ip_forward=1", sc.Sysctls)
+		}
+	})
+
+	vm := findContainer(t, pod.Spec.Containers, "firecracker-vm")
+
+	t.Run("vm requests kvm and tun", func(t *testing.T) {
+		for _, name := range []corev1.ResourceName{"dozlab.io/kvm", "dozlab.io/tun"} {
+			checkQuantity(t, string(name)+" request", vm.Resources.Requests[name], "1")
+			checkQuantity(t, string(name)+" limit", vm.Resources.Limits[name], "1")
+		}
+	})
+
+	t.Run("vm runs as root with caps", func(t *testing.T) {
+		sc := vm.SecurityContext
+		if sc == nil {
+			t.Fatal("vm security context is nil")
+		}
+		if sc.RunAsNonRoot != nil || sc.RunAsUser != nil || sc.AllowPrivilegeEscalation != nil {
+			t.Errorf("vm must run as root: runAsNonRoot=%v runAsUser=%v allowPrivilegeEscalation=%v",
+				sc.RunAsNonRoot, sc.RunAsUser, sc.AllowPrivilegeEscalation)
+		}
+		if sc.Privileged != nil && *sc.Privileged {
+			t.Error("vm must not be privileged")
+		}
+		if sc.Capabilities == nil {
+			t.Fatal("vm capabilities are nil")
+		}
+		want := map[corev1.Capability]bool{"NET_ADMIN": true, "SYS_ADMIN": true, "SYS_RESOURCE": true}
+		for _, c := range sc.Capabilities.Add {
+			delete(want, c)
+		}
+		if len(want) != 0 {
+			t.Errorf("capabilities %v missing from %v", want, sc.Capabilities.Add)
+		}
+		if len(sc.Capabilities.Drop) != 0 {
+			t.Errorf("capabilities drop = %v, want none", sc.Capabilities.Drop)
+		}
+	})
+
+	t.Run("vm uses image entrypoint", func(t *testing.T) {
+		if len(vm.Command) != 0 || len(vm.Args) != 0 {
+			t.Errorf("vm command/args = %v %v, want image entrypoint", vm.Command, vm.Args)
+		}
+	})
+
+	t.Run("vm env", func(t *testing.T) {
+		want := map[string]string{
+			"SESSION_ID":  "demo",
+			"ROOTFS_PATH": "/srv/vm/kernels/rootfs.ext4",
+			"KERNEL_PATH": "/find/vmlinux.bin",
+			"VM_IP":       "172.16.0.2",
+			"GATEWAY_IP":  "172.16.0.1",
+		}
+		for k, v := range want {
+			if got, ok := envValue(vm, k); !ok || got != v {
+				t.Errorf("vm %s = %q, want %q", k, got, v)
+			}
+		}
+	})
+
+	t.Run("init-rootfs writes the rootfs the vm reads", func(t *testing.T) {
+		init := findContainer(t, pod.Spec.InitContainers, "init-rootfs")
+		if init.Image != testSettings.InitImage {
+			t.Errorf("init image = %q, want %q", init.Image, testSettings.InitImage)
+		}
+		rootfs, _ := envValue(vm, "ROOTFS_PATH")
+		if got, _ := envValue(init, "IMAGE_PATH"); got != rootfs {
+			t.Errorf("init IMAGE_PATH = %q, want vm ROOTFS_PATH %q", got, rootfs)
+		}
+		if got, _ := envValue(init, "IMAGE_SIZE"); got != "4096M" {
+			t.Errorf("init IMAGE_SIZE = %q, want %q", got, "4096M")
+		}
+		if got, _ := envValue(init, "IMAGE_DOWNLOAD_URL"); got != "https://example.test/rootfs.ext4" {
+			t.Errorf("init IMAGE_DOWNLOAD_URL = %q, want the session rootfsUrl", got)
+		}
+	})
+
+	t.Run("vm-kernels is larger than the disk", func(t *testing.T) {
+		for _, v := range pod.Spec.Volumes {
+			if v.Name != "vm-kernels" {
+				continue
+			}
+			if v.EmptyDir == nil || v.EmptyDir.SizeLimit == nil {
+				t.Fatal("vm-kernels must be an emptyDir with a sizeLimit")
+			}
+			if v.EmptyDir.SizeLimit.Cmp(resource.MustParse(testSettings.VMDiskSize)) <= 0 {
+				t.Errorf("vm-kernels sizeLimit %s must exceed disk size %s", v.EmptyDir.SizeLimit.String(), testSettings.VMDiskSize)
+			}
+			return
+		}
+		t.Error("vm-kernels volume not found")
+	})
+
+	t.Run("terminal gets ssh user and key from secret", func(t *testing.T) {
+		term := findContainer(t, pod.Spec.Containers, "terminal-sidecar")
+		if got, _ := envValue(term, "SSH_USER"); got != "root" {
+			t.Errorf("SSH_USER = %q, want root", got)
+		}
+		if got, _ := envValue(term, "VM_IP"); got != "172.16.0.2" {
+			t.Errorf("terminal VM_IP = %q, want 172.16.0.2", got)
+		}
+		var ref *corev1.SecretKeySelector
+		for _, e := range term.Env {
+			if e.Name == "SSH_PRIVATE_KEY" && e.ValueFrom != nil {
+				ref = e.ValueFrom.SecretKeyRef
+			}
+		}
+		if ref == nil || ref.Name != "lab-ssh-key" || ref.Key != "id_ed25519" {
+			t.Errorf("SSH_PRIVATE_KEY secretKeyRef = %+v, want lab-ssh-key/id_ed25519", ref)
+		}
+	})
+
+	t.Run("no placeholder images", func(t *testing.T) {
+		all := append(append([]corev1.Container{}, pod.Spec.InitContainers...), pod.Spec.Containers...)
+		for _, c := range all {
+			if strings.HasPrefix(c.Image, "your-") || c.Image == "" {
+				t.Errorf("container %q has placeholder image %q", c.Name, c.Image)
+			}
+			for _, a := range append(append([]string{}, c.Command...), c.Args...) {
+				if strings.Contains(a, "your-") {
+					t.Errorf("container %q still runs a placeholder: %q", c.Name, a)
+				}
+			}
+		}
+	})
+}
+
+func TestResize2fsSize(t *testing.T) {
+	tests := []struct {
+		in, want string
+	}{
+		{"4Gi", "4096M"},
+		{"512Mi", "512M"},
+		{"10G", "9536M"}, // decimal G rounds down to whole MiB
+	}
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			if got := resize2fsSize(resource.MustParse(tt.in)); got != tt.want {
+				t.Errorf("resize2fsSize(%s) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestVMKernelsSizeLimit(t *testing.T) {
+	got := vmKernelsSizeLimit(resource.MustParse("4Gi"))
+	if got.Cmp(resource.MustParse("8Gi")) != 0 {
+		t.Errorf("vmKernelsSizeLimit(4Gi) = %s, want 8Gi", got.String())
 	}
 }
