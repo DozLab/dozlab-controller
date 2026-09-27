@@ -115,12 +115,45 @@ KUBECONFIG=/path/to/kubeconfig
 METRICS_BIND_ADDRESS=:8080
 HEALTH_PROBE_BIND_ADDRESS=:8081
 LEADER_ELECT=true
-
-# Lab configuration
-DEFAULT_NAMESPACE=dozlab-labs
-LAB_IMAGE_REGISTRY=your-registry.com
-SIDECAR_IMAGE=your-registry/terminal-sidecar:latest
 ```
+
+### Lab pod settings
+
+Each setting is a flag with an environment variable fallback. The three images have no
+defaults (none of the lab images are on a public registry yet), and the controller exits
+at startup if any is missing.
+
+| Flag | Env var | Default | Purpose |
+|---|---|---|---|
+| `--vm-image` | `DOZLAB_VM_IMAGE` | required | Firecracker image (dozlab-infra); its own entrypoint boots the VM |
+| `--init-image` | `DOZLAB_INIT_IMAGE` | required | Rootfs init image (dozlab-rootfs-manager `init-setup`) |
+| `--terminal-image` | `DOZLAB_TERMINAL_IMAGE` | required | Terminal sidecar image (dozlab-terminal-sidecar) |
+| `--ssh-key-secret` | `DOZLAB_SSH_KEY_SECRET` | `lab-ssh-key` | Secret in the session namespace with the VM's SSH private key |
+| `--ssh-key-secret-key` | `DOZLAB_SSH_KEY_SECRET_KEY` | `id_ed25519` | Key inside that Secret |
+| `--ssh-user` | `DOZLAB_SSH_USER` | `root` | User the terminal sidecar logs into the VM as |
+| `--vm-disk-size` | `DOZLAB_VM_DISK_SIZE` | `4Gi` | Size the rootfs is grown to; the `vm-kernels` volume is sized at twice this |
+
+A LabSession's `customImages.initrdImage` / `terminalImage` override the VM and terminal
+images for that session.
+
+Example for a local cluster with locally built images:
+
+```bash
+DOZLAB_VM_IMAGE=dozlab-firecracker:local \
+DOZLAB_INIT_IMAGE=dozlab-init:local \
+DOZLAB_TERMINAL_IMAGE=dozlab-terminal:local \
+go run ./cmd/controller
+```
+
+Nodes that run lab pods also need:
+
+- a device plugin exposing `dozlab.io/kvm` (`/dev/kvm`) and `dozlab.io/tun` (`/dev/net/tun`),
+- the kubelet flag `--allowed-unsafe-sysctls=net.ipv4.ip_forward` (the pod sets that sysctl so
+  `start-firecracker.sh` can NAT the VM).
+
+The VM container runs as root with `NET_ADMIN`, `SYS_ADMIN` and `SYS_RESOURCE`: as non-root the
+added capabilities have no effect and the tap device / iptables setup fails. The generated pod
+matches `reference/lab-pod-working.yaml` in the DozLab workspace, which is verified to boot.
 
 ## Development
 

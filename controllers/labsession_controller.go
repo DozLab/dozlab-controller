@@ -24,6 +24,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+
+	labcontroller "dozlab-controller/internal/controller"
 )
 
 // LabSessionReconciler reconciles a LabSession object
@@ -38,6 +40,8 @@ type LabSessionReconciler struct {
 	BaseRetryDelay   time.Duration
 	// Following dozlab-api patterns for status updates
 	statusUpdateMutex map[string]*sync.Mutex
+	// ResourceBuilder builds the lab pod (shared with internal/controller)
+	ResourceBuilder *labcontroller.ResourceBuilder
 }
 
 const (
@@ -152,7 +156,6 @@ func (r *LabSessionReconciler) reconcileLabSession(ctx context.Context, labSessi
 
 func (r *LabSessionReconciler) reconcilePod(ctx context.Context, labSession *unstructured.Unstructured, spec map[string]interface{}) (*corev1.Pod, error) {
 	sessionID, _ := spec["sessionId"].(string)
-	userID, _ := spec["userId"].(string)
 
 	podName := fmt.Sprintf("lab-session-%s", sessionID)
 	pod := &corev1.Pod{}
@@ -164,7 +167,10 @@ func (r *LabSessionReconciler) reconcilePod(ctx context.Context, labSession *uns
 
 	if err != nil && errors.IsNotFound(err) {
 		// Create new pod
-		pod = r.buildPod(labSession, spec, userID, sessionID)
+		pod, err = r.buildPod(labSession, spec)
+		if err != nil {
+			return nil, err
+		}
 		if err := ctrl.SetControllerReference(labSession, pod, r.Scheme); err != nil {
 			return nil, err
 		}
@@ -176,319 +182,21 @@ func (r *LabSessionReconciler) reconcilePod(ctx context.Context, labSession *uns
 	return pod, nil
 }
 
-func (r *LabSessionReconciler) buildPod(labSession *unstructured.Unstructured, spec map[string]interface{}, userID, sessionID string) *corev1.Pod {
-	
-	// HELPER: Extract and validate resource requirements
-	resourceLimits := r.extractResourceLimits(spec)
-	
-	// HELPER: Extract configuration parameters
-	config := r.extractPodConfig(spec)
-	
-	podName := fmt.Sprintf("lab-session-%s", sessionID)
-
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      podName,
-			Namespace: labSession.GetNamespace(),
-			Labels: map[string]string{
-				"app":        "lab-environment",
-				"session-id": sessionID,
-				"user-id":    userID,
-			},
-		},
-		Spec: corev1.PodSpec{
-			RestartPolicy: corev1.RestartPolicyNever,
-			InitContainers: []corev1.Container{
-				{
-					Name:  "ip-calculator",
-					Image: "busybox",
-					Command: []string{"sh", "-c"},
-					Args: []string{`
-						echo "Calculating VM IP from pod IP..."
-						POD_IP=$(hostname -i)
-						echo "Pod IP: $POD_IP"
-						
-						# Calculate VM IP (pod IP + 1)
-						VM_IP=$(echo $POD_IP | awk -F. '{$4=$4+1; print $1"."$2"."$3"."$4}')
-						echo "VM IP will be: $VM_IP"
-						
-						# Write to shared config
-						echo "POD_IP=$POD_IP" > /shared/network-config
-						echo "VM_IP=$VM_IP" >> /shared/network-config
-						
-						echo "Network configuration written to /shared/network-config"
-						cat /shared/network-config
-					`},
-					VolumeMounts: []corev1.VolumeMount{
-						{
-							Name:      "shared-config",
-							MountPath: "/shared",
-						},
-					},
-				},
-			},
-			Containers: []corev1.Container{
-				{
-					Name:  "initrd-vm",
-					Image: "your-initrd:latest",
-					// SECURITY FIX: Remove unnecessary privileged access (following security best practices)
-					SecurityContext: &corev1.SecurityContext{
-						Privileged:               &[]bool{false}[0], // No more privileged containers!
-						AllowPrivilegeEscalation: &[]bool{false}[0],
-						RunAsNonRoot:             &[]bool{true}[0],
-						RunAsUser:                &[]int64{1000}[0], // Run as non-root user
-						ReadOnlyRootFilesystem:   &[]bool{true}[0],
-						Capabilities: &corev1.Capabilities{
-							Drop: []corev1.Capability{"ALL"}, // Drop all capabilities
-							// Add only necessary capabilities for VM management
-							Add: []corev1.Capability{"NET_ADMIN", "SYS_ADMIN"}, // Minimal required caps
-						},
-					},
-					Resources: corev1.ResourceRequirements{
-						Limits: corev1.ResourceList{
-							corev1.ResourceMemory: resource.MustParse(resourceLimits.Memory),
-							corev1.ResourceCPU:    resource.MustParse(resourceLimits.CPU),
-						},
-						Requests: corev1.ResourceList{
-							corev1.ResourceMemory: resource.MustParse(getMemoryRequest(resourceLimits.Memory)),
-							corev1.ResourceCPU:    resource.MustParse(getCPURequest(resourceLimits.CPU)),
-						},
-					},
-					Env: []corev1.EnvVar{
-						{
-							Name:  "SESSION_ID",
-							Value: sessionID,
-						},
-						{
-							Name: "POD_IP",
-							ValueFrom: &corev1.EnvVarSource{
-								FieldRef: &corev1.ObjectFieldSelector{
-									FieldPath: "status.podIP",
-								},
-							},
-						},
-					},
-					Command: []string{"sh", "-c"},
-					Args: []string{`
-						source /shared/network-config
-						export VM_IP=$VM_IP
-						echo "VM will use IP: $VM_IP"
-						# Start your initrd/firecracker process here
-						exec your-initrd-startup-script
-					`},
-					Ports: []corev1.ContainerPort{
-						{
-							ContainerPort: 22,
-							Name:          "vm-ssh",
-						},
-						{
-							ContainerPort: 9090,
-							Name:          "metrics",
-						},
-					},
-					// MONITORING: Add health checks for VM container
-					LivenessProbe: &corev1.Probe{
-						ProbeHandler: corev1.ProbeHandler{
-							TCPSocket: &corev1.TCPSocketAction{
-								Port: intstr.FromInt(22),
-							},
-						},
-						InitialDelaySeconds: 30,
-						PeriodSeconds:       10,
-						TimeoutSeconds:      5,
-						FailureThreshold:    3,
-					},
-					ReadinessProbe: &corev1.Probe{
-						ProbeHandler: corev1.ProbeHandler{
-							TCPSocket: &corev1.TCPSocketAction{
-								Port: intstr.FromInt(22),
-							},
-						},
-						InitialDelaySeconds: 5,
-						PeriodSeconds:       5,
-						TimeoutSeconds:      3,
-						FailureThreshold:    3,
-					},
-					VolumeMounts: []corev1.VolumeMount{
-						{
-							Name:      "vm-data",
-							MountPath: "/vm-data",
-						},
-						{
-							Name:      "shared-config",
-							MountPath: "/shared",
-						},
-					},
-				},
-				{
-					Name:  "terminal-sidecar",
-					Image: "your-terminal-sidecar:latest",
-					Ports: []corev1.ContainerPort{
-						{
-							ContainerPort: 8081,
-							Name:          "terminal",
-						},
-					},
-					// MONITORING: Add health checks for terminal-sidecar
-					LivenessProbe: &corev1.Probe{
-						ProbeHandler: corev1.ProbeHandler{
-							HTTPGet: &corev1.HTTPGetAction{
-								Path: "/health",
-								Port: intstr.FromInt(8081),
-							},
-						},
-						InitialDelaySeconds: 15,
-						PeriodSeconds:       10,
-						TimeoutSeconds:      5,
-						FailureThreshold:    3,
-					},
-					ReadinessProbe: &corev1.Probe{
-						ProbeHandler: corev1.ProbeHandler{
-							HTTPGet: &corev1.HTTPGetAction{
-								Path: "/health",
-								Port: intstr.FromInt(8081),
-							},
-						},
-						InitialDelaySeconds: 5,
-						PeriodSeconds:       5,
-						TimeoutSeconds:      3,
-						FailureThreshold:    3,
-					},
-					Env: []corev1.EnvVar{
-						{
-							Name:  "SESSION_ID",
-							Value: sessionID,
-						},
-						{
-							Name: "POD_IP",
-							ValueFrom: &corev1.EnvVarSource{
-								FieldRef: &corev1.ObjectFieldSelector{
-									FieldPath: "status.podIP",
-								},
-							},
-						},
-					},
-					Command: []string{"sh", "-c"},
-					Args: []string{`
-						source /shared/network-config
-						export VM_IP=$VM_IP
-						echo "Terminal sidecar will connect to VM at: $VM_IP"
-						exec ./terminal-sidecar
-					`},
-					Resources: corev1.ResourceRequirements{
-						Limits: corev1.ResourceList{
-							corev1.ResourceMemory: resource.MustParse("512Mi"),
-							corev1.ResourceCPU:    resource.MustParse("500m"),
-						},
-						Requests: corev1.ResourceList{
-							corev1.ResourceMemory: resource.MustParse("256Mi"),
-							corev1.ResourceCPU:    resource.MustParse("250m"),
-						},
-					},
-					VolumeMounts: []corev1.VolumeMount{
-						{
-							Name:      "vm-data",
-							MountPath: "/vm-data",
-							ReadOnly:  true,
-						},
-						{
-							Name:      "shared-config",
-							MountPath: "/shared",
-						},
-					},
-				},
-				{
-					Name:  "code-server",
-					Image: "codercom/code-server:latest",
-					Ports: []corev1.ContainerPort{
-						{
-							ContainerPort: 8080,
-							Name:          "vscode",
-						},
-					},
-					Env: []corev1.EnvVar{
-						{
-							Name:  "PASSWORD",
-							Value: config.VSCodePassword,
-						},
-						{
-							Name:  "SESSION_ID",
-							Value: sessionID,
-						},
-						{
-							Name: "POD_IP",
-							ValueFrom: &corev1.EnvVarSource{
-								FieldRef: &corev1.ObjectFieldSelector{
-									FieldPath: "status.podIP",
-								},
-							},
-						},
-					},
-					Command: []string{"sh", "-c"},
-					Args: []string{`
-						source /shared/network-config
-						export VM_IP=$VM_IP
-						echo "VS Code will connect to VM at: $VM_IP"
-						exec code-server --bind-addr 0.0.0.0:8080 --auth password
-					`},
-					Resources: corev1.ResourceRequirements{
-						Limits: corev1.ResourceList{
-							corev1.ResourceMemory: resource.MustParse("2Gi"),
-							corev1.ResourceCPU:    resource.MustParse("1"),
-						},
-						Requests: corev1.ResourceList{
-							corev1.ResourceMemory: resource.MustParse("1Gi"),
-							corev1.ResourceCPU:    resource.MustParse("500m"),
-						},
-					},
-					VolumeMounts: []corev1.VolumeMount{
-						{
-							Name:      "vscode-data",
-							MountPath: "/home/coder",
-						},
-						{
-							Name:      "vm-data",
-							MountPath: "/workspace",
-							ReadOnly:  true,
-						},
-						{
-							Name:      "shared-config",
-							MountPath: "/shared",
-						},
-					},
-				},
-			},
-			Volumes: []corev1.Volume{
-				{
-					Name: "vm-data",
-					VolumeSource: corev1.VolumeSource{
-						// STORAGE: Replace EmptyDir with PVC to prevent data loss
-						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-							ClaimName: fmt.Sprintf("vm-data-%s", sessionID),
-						},
-					},
-				},
-				{
-					Name: "vscode-data",
-					VolumeSource: corev1.VolumeSource{
-						// STORAGE: Replace EmptyDir with PVC to prevent data loss
-						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-							ClaimName: fmt.Sprintf("vscode-data-%s", sessionID),
-						},
-					},
-				},
-				{
-					Name: "shared-config",
-					VolumeSource: corev1.VolumeSource{
-						// Keep EmptyDir for shared config as it's ephemeral
-						EmptyDir: &corev1.EmptyDirVolumeSource{},
-					},
-				},
-			},
-		},
+// buildPod builds the lab pod with the shared internal/controller builder. The
+// legacy resource caps and VS Code password default still apply here.
+func (r *LabSessionReconciler) buildPod(labSession *unstructured.Unstructured, spec map[string]interface{}) (*corev1.Pod, error) {
+	session := &labcontroller.LabSession{}
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(spec, &session.Spec); err != nil {
+		return nil, fmt.Errorf("invalid LabSession spec: %w", err)
 	}
+	session.Namespace = labSession.GetNamespace()
 
-	return pod
+	resourceLimits := r.extractResourceLimits(spec)
+	session.Spec.Resources.Memory = resourceLimits.Memory
+	session.Spec.Resources.CPU = resourceLimits.CPU
+	session.Spec.Config.VSCodePassword = r.extractPodConfig(spec).VSCodePassword
+
+	return r.ResourceBuilder.BuildPod(session), nil
 }
 
 func (r *LabSessionReconciler) reconcileService(ctx context.Context, labSession *unstructured.Unstructured, spec map[string]interface{}) (*corev1.Service, error) {
@@ -661,23 +369,7 @@ func getStringFromMap(m map[string]interface{}, key, defaultVal string) string {
 	return defaultVal
 }
 
-func getMemoryRequest(limit string) string {
-	// Return 75% of limit as request
-	if strings.HasSuffix(limit, "Gi") {
-		if val, err := strconv.Atoi(strings.TrimSuffix(limit, "Gi")); err == nil {
-			return fmt.Sprintf("%dGi", val*3/4)
-		}
-	}
-	return "3Gi" // default
-}
 
-func getCPURequest(limit string) string {
-	// Return 50% of limit as request
-	if val, err := strconv.Atoi(limit); err == nil {
-		return fmt.Sprintf("%d", val/2)
-	}
-	return "1" // default
-}
 
 func calculateVMIP(podIP string) string {
 	parts := strings.Split(podIP, ".")
@@ -890,6 +582,9 @@ func getNestedString(obj map[string]interface{}, fields ...string) (string, bool
 
 // SetupWithManager sets up the controller with the Manager
 func (r *LabSessionReconciler) SetupWithManager(mgr ctrl.Manager, maxConcurrentReconciles int) error {
+	if r.ResourceBuilder == nil {
+		return fmt.Errorf("LabSessionReconciler.ResourceBuilder must be set")
+	}
 	// Initialize controller with proper defaults (following dozlab-api initialization pattern)
 	if r.MaxRetries == 0 {
 		r.MaxRetries = MaxRetryAttempts
@@ -1000,131 +695,5 @@ func (r *LabSessionReconciler) extractPodConfig(spec map[string]interface{}) Pod
 	config, _ := spec["config"].(map[string]interface{})
 	return PodConfig{
 		VSCodePassword: getStringFromMap(config, "vsCodePassword", "password123"),
-	}
-}
-
-// HELPER: Build container specifications
-func (r *LabSessionReconciler) buildVMContainer(sessionID string, resourceLimits ResourceLimits) corev1.Container {
-	return corev1.Container{
-		Name:  "initrd-vm",
-		Image: "your-initrd:latest",
-		// SECURITY FIX: Remove unnecessary privileged access (following security best practices)
-		SecurityContext: r.buildSecureSecurityContext(),
-		Resources: corev1.ResourceRequirements{
-			Limits: corev1.ResourceList{
-				corev1.ResourceMemory: resource.MustParse(resourceLimits.Memory),
-				corev1.ResourceCPU:    resource.MustParse(resourceLimits.CPU),
-			},
-			Requests: corev1.ResourceList{
-				corev1.ResourceMemory: resource.MustParse(getMemoryRequest(resourceLimits.Memory)),
-				corev1.ResourceCPU:    resource.MustParse(getCPURequest(resourceLimits.CPU)),
-			},
-		},
-		Env:     r.buildVMEnvironmentVars(sessionID),
-		Command: []string{"sh", "-c"},
-		Args: []string{`
-			source /shared/network-config
-			export VM_IP=$VM_IP
-			echo "VM will use IP: $VM_IP"
-			# Start your initrd/firecracker process here
-			exec your-initrd-startup-script
-		`},
-		Ports: r.buildVMPorts(),
-		// MONITORING: Add health checks for VM container
-		LivenessProbe:  r.buildVMLivenessProbe(),
-		ReadinessProbe: r.buildVMReadinessProbe(),
-		VolumeMounts:   r.buildVMVolumeMounts(),
-	}
-}
-
-// HELPER: Build secure security context
-func (r *LabSessionReconciler) buildSecureSecurityContext() *corev1.SecurityContext {
-	return &corev1.SecurityContext{
-		Privileged:               &[]bool{false}[0], // No more privileged containers!
-		AllowPrivilegeEscalation: &[]bool{false}[0],
-		RunAsNonRoot:             &[]bool{true}[0],
-		RunAsUser:                &[]int64{1000}[0], // Run as non-root user
-		ReadOnlyRootFilesystem:   &[]bool{true}[0],
-		Capabilities: &corev1.Capabilities{
-			Drop: []corev1.Capability{"ALL"}, // Drop all capabilities
-			// Add only necessary capabilities for VM management
-			Add: []corev1.Capability{"NET_ADMIN", "SYS_ADMIN"}, // Minimal required caps
-		},
-	}
-}
-
-// HELPER: Build VM environment variables
-func (r *LabSessionReconciler) buildVMEnvironmentVars(sessionID string) []corev1.EnvVar {
-	return []corev1.EnvVar{
-		{
-			Name:  "SESSION_ID",
-			Value: sessionID,
-		},
-		{
-			Name: "POD_IP",
-			ValueFrom: &corev1.EnvVarSource{
-				FieldRef: &corev1.ObjectFieldSelector{
-					FieldPath: "status.podIP",
-				},
-			},
-		},
-	}
-}
-
-// HELPER: Build VM container ports
-func (r *LabSessionReconciler) buildVMPorts() []corev1.ContainerPort {
-	return []corev1.ContainerPort{
-		{
-			ContainerPort: 22,
-			Name:          "vm-ssh",
-		},
-		{
-			ContainerPort: 9090,
-			Name:          "metrics",
-		},
-	}
-}
-
-// HELPER: Build VM liveness probe
-func (r *LabSessionReconciler) buildVMLivenessProbe() *corev1.Probe {
-	return &corev1.Probe{
-		ProbeHandler: corev1.ProbeHandler{
-			TCPSocket: &corev1.TCPSocketAction{
-				Port: intstr.FromInt(22),
-			},
-		},
-		InitialDelaySeconds: 30,
-		PeriodSeconds:       10,
-		TimeoutSeconds:      5,
-		FailureThreshold:    3,
-	}
-}
-
-// HELPER: Build VM readiness probe
-func (r *LabSessionReconciler) buildVMReadinessProbe() *corev1.Probe {
-	return &corev1.Probe{
-		ProbeHandler: corev1.ProbeHandler{
-			TCPSocket: &corev1.TCPSocketAction{
-				Port: intstr.FromInt(22),
-			},
-		},
-		InitialDelaySeconds: 5,
-		PeriodSeconds:       5,
-		TimeoutSeconds:      3,
-		FailureThreshold:    3,
-	}
-}
-
-// HELPER: Build VM volume mounts
-func (r *LabSessionReconciler) buildVMVolumeMounts() []corev1.VolumeMount {
-	return []corev1.VolumeMount{
-		{
-			Name:      "vm-data",
-			MountPath: "/vm-data",
-		},
-		{
-			Name:      "shared-config",
-			MountPath: "/shared",
-		},
 	}
 }

@@ -60,6 +60,9 @@ func main() {
 	flag.DurationVar(&gracefulShutdownTimeout, "graceful-shutdown-timeout", 30*time.Second,
 		"Timeout for graceful shutdown (default: 30 seconds)")
 
+	var podSettings controller.PodSettings
+	podSettings.BindFlags(flag.CommandLine)
+
 	opts := zap.Options{
 		Development: true,
 	}
@@ -67,6 +70,11 @@ func main() {
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	if err := podSettings.Validate(); err != nil {
+		setupLog.Error(err, "invalid lab pod settings")
+		os.Exit(1)
+	}
 
 	// Configure cache settings for optimal performance
 	cacheOpts := cache.Options{
@@ -104,9 +112,10 @@ func main() {
 
 	// Setup controller with optimizations
 	if err = (&controller.LabSessionReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("dozlab-controller"),
+		Client:          mgr.GetClient(),
+		Scheme:          mgr.GetScheme(),
+		Recorder:        mgr.GetEventRecorderFor("dozlab-controller"),
+		ResourceBuilder: controller.NewResourceBuilder(podSettings),
 	}).SetupWithManager(mgr, maxConcurrentReconciles); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "LabSession")
 		os.Exit(1)

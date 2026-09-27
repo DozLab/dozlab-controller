@@ -452,8 +452,9 @@ func (r *LabSessionReconciler) setCondition(session *LabSession, conditionType s
 
 // SetupWithManager sets up the controller with the Manager
 func (r *LabSessionReconciler) SetupWithManager(mgr ctrl.Manager, maxConcurrentReconciles int) error {
-	// Initialize resource builder
-	r.ResourceBuilder = NewResourceBuilder()
+	if r.ResourceBuilder == nil {
+		return fmt.Errorf("LabSessionReconciler.ResourceBuilder must be set")
+	}
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&LabSession{}).

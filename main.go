@@ -22,6 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	"dozlab-controller/controllers"
+	labcontroller "dozlab-controller/internal/controller"
 )
 
 var (
@@ -83,6 +84,9 @@ func main() {
 	flag.DurationVar(&gracefulShutdownTimeout, "graceful-shutdown-timeout", 30*time.Second,
 		"Timeout for graceful shutdown (default: 30 seconds)")
 	
+	var podSettings labcontroller.PodSettings
+	podSettings.BindFlags(flag.CommandLine)
+
 	opts := zap.Options{
 		Development: true,
 	}
@@ -90,6 +94,11 @@ func main() {
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	if err := podSettings.Validate(); err != nil {
+		setupLog.Error(err, "invalid lab pod settings")
+		os.Exit(1)
+	}
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will
@@ -161,8 +170,9 @@ func main() {
 	}
 
 	if err = (&controllers.LabSessionReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:          mgr.GetClient(),
+		Scheme:          mgr.GetScheme(),
+		ResourceBuilder: labcontroller.NewResourceBuilder(podSettings),
 	}).SetupWithManager(mgr, maxConcurrentReconciles); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "LabSession")
 		os.Exit(1)
