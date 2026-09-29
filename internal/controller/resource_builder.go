@@ -160,15 +160,12 @@ func (rb *ResourceBuilder) buildVMContainer(session *LabSession, resourceLimits 
 		Ports: []corev1.ContainerPort{
 			{ContainerPort: VMSSHPort, Name: "vm-ssh"},
 		},
-		// sshd inside the VM, reached through start-firecracker.sh's DNAT on the pod IP
+		// sshd inside the VM, reached through start-firecracker.sh's DNAT on the pod IP.
+		// Readiness stays slow: sshd logs every probe connection.
+		StartupProbe: startupProbe(vmSSHProbe()),
 		ReadinessProbe: &corev1.Probe{
-			ProbeHandler: corev1.ProbeHandler{
-				TCPSocket: &corev1.TCPSocketAction{
-					Port: intstr.FromInt(VMSSHPort),
-				},
-			},
-			InitialDelaySeconds: 10,
-			PeriodSeconds:       5,
+			ProbeHandler:  vmSSHProbe(),
+			PeriodSeconds: 10,
 		},
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: "vm-kernels", MountPath: VMKernelsPath},
@@ -204,6 +201,12 @@ func (rb *ResourceBuilder) buildTerminalContainer(session *LabSession) corev1.Co
 			TimeoutSeconds:      5,
 			FailureThreshold:    3,
 		},
+		StartupProbe: startupProbe(corev1.ProbeHandler{
+			HTTPGet: &corev1.HTTPGetAction{
+				Path: "/health",
+				Port: intstr.FromInt(8081),
+			},
+		}),
 		ReadinessProbe: &corev1.Probe{
 			ProbeHandler: corev1.ProbeHandler{
 				HTTPGet: &corev1.HTTPGetAction{
@@ -211,10 +214,9 @@ func (rb *ResourceBuilder) buildTerminalContainer(session *LabSession) corev1.Co
 					Port: intstr.FromInt(8081),
 				},
 			},
-			InitialDelaySeconds: 5,
-			PeriodSeconds:       5,
-			TimeoutSeconds:      3,
-			FailureThreshold:    3,
+			PeriodSeconds:    5,
+			TimeoutSeconds:   3,
+			FailureThreshold: 3,
 		},
 		Env: []corev1.EnvVar{
 			{Name: "SESSION_ID", Value: sessionID},
@@ -279,6 +281,12 @@ func (rb *ResourceBuilder) buildVSCodeContainer(session *LabSession) corev1.Cont
 			TimeoutSeconds:      5,
 			FailureThreshold:    3,
 		},
+		StartupProbe: startupProbe(corev1.ProbeHandler{
+			HTTPGet: &corev1.HTTPGetAction{
+				Path: "/healthz",
+				Port: intstr.FromInt(8080),
+			},
+		}),
 		ReadinessProbe: &corev1.Probe{
 			ProbeHandler: corev1.ProbeHandler{
 				HTTPGet: &corev1.HTTPGetAction{
@@ -286,10 +294,9 @@ func (rb *ResourceBuilder) buildVSCodeContainer(session *LabSession) corev1.Cont
 					Port: intstr.FromInt(8080),
 				},
 			},
-			InitialDelaySeconds: 5,
-			PeriodSeconds:       5,
-			TimeoutSeconds:      3,
-			FailureThreshold:    3,
+			PeriodSeconds:    5,
+			TimeoutSeconds:   3,
+			FailureThreshold: 3,
 		},
 		Env: []corev1.EnvVar{
 			{Name: "SESSION_ID", Value: sessionID},
@@ -496,6 +503,29 @@ func (rb *ResourceBuilder) getResourceLimits(requested ResourceConfig) ResourceC
 // rejects malformed values, so the parse cannot fail for a validated config.
 func (rb *ResourceBuilder) diskSize() resource.Quantity {
 	return resource.MustParse(rb.settings.VMDiskSize)
+}
+
+// startupProbeBudgetSeconds is how long a lab container may take to first answer its
+// startup probe before the kubelet restarts it.
+const startupProbeBudgetSeconds = 120
+
+// startupProbe checks every second until the container first answers, so the pod turns
+// Ready as soon as the VM or sidecar is up. The kubelet runs the readiness probe as soon as
+// the startup probe passes, so readiness probes can keep a slow period.
+func startupProbe(handler corev1.ProbeHandler) *corev1.Probe {
+	return &corev1.Probe{
+		ProbeHandler:     handler,
+		PeriodSeconds:    1,
+		TimeoutSeconds:   1,
+		FailureThreshold: startupProbeBudgetSeconds,
+	}
+}
+
+// vmSSHProbe connects to sshd inside the VM
+func vmSSHProbe() corev1.ProbeHandler {
+	return corev1.ProbeHandler{
+		TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt(VMSSHPort)},
+	}
 }
 
 // vmKernelsSizeLimit sizes the vm-kernels volume at twice the disk, which
