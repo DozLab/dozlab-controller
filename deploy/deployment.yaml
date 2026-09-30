@@ -16,6 +16,10 @@ rules:
 - apiGroups: [""]
   resources: ["secrets"]
   verbs: ["create"]
+# Per-session Ingress: code-server and terminal by path through Traefik
+- apiGroups: ["networking.k8s.io"]
+  resources: ["ingresses"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 - apiGroups: [""]
   resources: ["events"]
   verbs: ["create", "patch"]
@@ -94,6 +98,12 @@ spec:
           value: dozlab-init:local
         - name: DOZLAB_TERMINAL_IMAGE
           value: dozlab-terminal:local
+        # Per-session Ingress (see README "Per-session Ingress"). The API creates sessions
+        # in "default", so the Middleware is there; the base URL is the Tailscale Funnel URL.
+        - name: DOZLAB_INGRESS_MIDDLEWARE
+          value: default-dozlab-strip-session-prefix@kubernetescrd
+        - name: DOZLAB_PUBLIC_BASE_URL
+          value: https://dozmanlab.taildc994d.ts.net
         # Event bus for LabSession phase changes (optional; see README "Phase change events")
         - name: RABBITMQ_URL
           valueFrom:

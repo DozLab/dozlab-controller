@@ -26,6 +26,9 @@ func TestPodSettingsValidate(t *testing.T) {
 		{"empty SSHUser", func(s *PodSettings) { s.SSHUser = "" }, "ssh user is required"},
 		{"unparsable VMDiskSize", func(s *PodSettings) { s.VMDiskSize = "lots" }, "invalid vm disk size"},
 		{"tiny VMDiskSize", func(s *PodSettings) { s.VMDiskSize = "100Ki" }, "below 1Mi"},
+		{"https PublicBaseURL", func(s *PodSettings) { s.PublicBaseURL = "https://lab.example.ts.net" }, ""},
+		{"PublicBaseURL without scheme", func(s *PodSettings) { s.PublicBaseURL = "lab.example.ts.net" }, "must be an http(s) URL"},
+		{"PublicBaseURL with other scheme", func(s *PodSettings) { s.PublicBaseURL = "ftp://lab.example" }, "must be an http(s) URL"},
 		{"all three images missing", func(s *PodSettings) {
 			s.VMImage = ""
 			s.InitImage = ""

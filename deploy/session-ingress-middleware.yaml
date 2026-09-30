@@ -1,0 +1,12 @@
+# Strips /sessions/<id>/<app> before a session Ingress forwards to code-server or the
+# terminal sidecar, which both serve from /. Apply it in the namespace the LabSessions run
+# in (the API uses "default"); Traefik only uses Middlewares from the Ingress's namespace.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: dozlab-strip-session-prefix
+  namespace: default
+spec:
+  stripPrefixRegex:
+    regex:
+    - ^/sessions/[^/]+/[^/]+
