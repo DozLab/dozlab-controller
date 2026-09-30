@@ -604,3 +604,60 @@ func TestVMKernelsSizeLimit(t *testing.T) {
 		t.Errorf("vmKernelsSizeLimit(4Gi) = %s, want 8Gi", got.String())
 	}
 }
+
+func TestBuildPodProbes(t *testing.T) {
+	pod := NewResourceBuilder(testSettings).BuildPod(newSession(LabSessionSpec{UserID: "u1", SessionID: "demo"}))
+
+	tests := []struct {
+		container           string
+		wantTCPPort         int
+		wantHTTPPath        string
+		wantReadinessPeriod int32
+	}{
+		{container: "firecracker-vm", wantTCPPort: 22, wantReadinessPeriod: 10},
+		{container: "terminal-sidecar", wantHTTPPath: "/health", wantReadinessPeriod: 5},
+		{container: "code-server", wantHTTPPath: "/healthz", wantReadinessPeriod: 5},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.container, func(t *testing.T) {
+			c := findContainer(t, pod.Spec.Containers, tt.container)
+
+			if c.StartupProbe == nil {
+				t.Fatal("startup probe is nil")
+			}
+			if got := c.StartupProbe.PeriodSeconds; got != 1 {
+				t.Errorf("startup probe period = %d, want 1", got)
+			}
+			if got := c.StartupProbe.FailureThreshold; got != startupProbeBudgetSeconds {
+				t.Errorf("startup probe failure threshold = %d, want %d", got, startupProbeBudgetSeconds)
+			}
+			if tt.wantTCPPort != 0 {
+				if c.StartupProbe.TCPSocket == nil {
+					t.Fatal("startup probe has no TCP check")
+				}
+				if got := c.StartupProbe.TCPSocket.Port.IntValue(); got != tt.wantTCPPort {
+					t.Errorf("startup probe port = %d, want %d", got, tt.wantTCPPort)
+				}
+			} else {
+				if c.StartupProbe.HTTPGet == nil {
+					t.Fatal("startup probe has no HTTP check")
+				}
+				if got := c.StartupProbe.HTTPGet.Path; got != tt.wantHTTPPath {
+					t.Errorf("startup probe path = %q, want %q", got, tt.wantHTTPPath)
+				}
+			}
+
+			// The startup probe gates readiness, so readiness needs no initial delay.
+			if c.ReadinessProbe == nil {
+				t.Fatal("readiness probe is nil")
+			}
+			if got := c.ReadinessProbe.InitialDelaySeconds; got != 0 {
+				t.Errorf("readiness initial delay = %d, want 0", got)
+			}
+			if got := c.ReadinessProbe.PeriodSeconds; got != tt.wantReadinessPeriod {
+				t.Errorf("readiness period = %d, want %d", got, tt.wantReadinessPeriod)
+			}
+		})
+	}
+}
