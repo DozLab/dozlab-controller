@@ -607,3 +607,23 @@ func TestVMKernelsSizeLimit(t *testing.T) {
 		t.Errorf("vmKernelsSizeLimit(4Gi) = %s, want 8Gi", got.String())
 	}
 }
+
+func TestInitImagePerLab(t *testing.T) {
+	rb := NewResourceBuilder(testSettings)
+	for _, tc := range []struct {
+		name, initImage, want string
+	}{
+		{"no lab image uses the controller default", "", testSettings.InitImage},
+		{"the lab's image wins", "dozlab-init-k8s:1", "dozlab-init-k8s:1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pod := rb.BuildPod(newSession(LabSessionSpec{
+				SessionID:    "demo",
+				CustomImages: ImageConfig{InitImage: tc.initImage},
+			}))
+			if got := findContainer(t, pod.Spec.InitContainers, "init-rootfs").Image; got != tc.want {
+				t.Errorf("init-rootfs image = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

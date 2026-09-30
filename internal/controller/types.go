@@ -46,6 +46,9 @@ type SessionConfig struct {
 
 // ImageConfig allows customization of container images
 type ImageConfig struct {
+	// InitImage is the init container with the lab's VM rootfs (dozlab-init-<lab>);
+	// the API sets it from the lab, so each session boots the lab it asked for.
+	InitImage     string `json:"initImage,omitempty"`
 	InitrdImage   string `json:"initrdImage,omitempty"`
 	TerminalImage string `json:"terminalImage,omitempty"`
 	VSCodeImage   string `json:"vscodeImage,omitempty"`

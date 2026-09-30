@@ -88,9 +88,13 @@ func (rb *ResourceBuilder) BuildPod(session *LabSession) *corev1.Pod {
 // writes the session's cloud-init seed (root's SSH key) into it
 func (rb *ResourceBuilder) buildRootfsInitContainer(session *LabSession) corev1.Container {
 	sessionID := session.Spec.SessionID
+	initImage := rb.settings.InitImage
+	if session.Spec.CustomImages.InitImage != "" {
+		initImage = session.Spec.CustomImages.InitImage
+	}
 	return corev1.Container{
 		Name:  "init-rootfs",
-		Image: rb.settings.InitImage,
+		Image: initImage,
 		Env: []corev1.EnvVar{
 			{Name: "IMAGE_DOWNLOAD_URL", Value: session.Spec.RootfsURL},
 			{Name: "IMAGE_SIZE", Value: resize2fsSize(rb.diskSize())},
