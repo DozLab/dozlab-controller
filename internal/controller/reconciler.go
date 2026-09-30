@@ -8,6 +8,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -189,6 +190,11 @@ func (r *LabSessionReconciler) reconcileCreating(ctx context.Context, session *L
 	// Step 4: Create Service
 	if err := r.ensureService(ctx, session); err != nil {
 		return r.handleCreateError(ctx, session, "Failed to create Service", err)
+	}
+
+	// Step 4b: Create Ingress (code-server and terminal by path)
+	if err := r.ensureIngress(ctx, session); err != nil {
+		return r.handleCreateError(ctx, session, "Failed to create Ingress", err)
 	}
 
 	// Step 5: Check if pod is running
@@ -543,22 +549,18 @@ func (r *LabSessionReconciler) updateEndpoints(ctx context.Context, session *Lab
 		return err
 	}
 
-	endpoints := make(map[string]string)
+	// code-server and the terminal go through the session's Ingress
+	endpoints := r.ResourceBuilder.SessionEndpoints(session.Spec.SessionID)
 
-	// For LoadBalancer services, get the external IP/hostname
-	if service.Spec.Type == corev1.ServiceTypeLoadBalancer {
-		if len(service.Status.LoadBalancer.Ingress) > 0 {
-			ingress := service.Status.LoadBalancer.Ingress[0]
-			host := ingress.IP
-			if host == "" {
-				host = ingress.Hostname
-			}
-
-			if host != "" {
-				endpoints["vscode"] = fmt.Sprintf("http://%s:8080", host)
-				endpoints["terminal"] = fmt.Sprintf("http://%s:8081", host)
-				endpoints["ssh"] = fmt.Sprintf("ssh://%s:22", host)
-			}
+	// SSH isn't HTTP: only a LoadBalancer's external IP/hostname reaches it
+	if service.Spec.Type == corev1.ServiceTypeLoadBalancer && len(service.Status.LoadBalancer.Ingress) > 0 {
+		ingress := service.Status.LoadBalancer.Ingress[0]
+		host := ingress.IP
+		if host == "" {
+			host = ingress.Hostname
+		}
+		if host != "" {
+			endpoints["ssh"] = fmt.Sprintf("ssh://%s:22", host)
 		}
 	}
 
@@ -620,6 +622,7 @@ func (r *LabSessionReconciler) SetupWithManager(mgr ctrl.Manager, maxConcurrentR
 		For(&LabSession{}).
 		Owns(&corev1.Pod{}).
 		Owns(&corev1.Service{}).
+		Owns(&networkingv1.Ingress{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
 		WithOptions(controller.Options{
 			MaxConcurrentReconciles: maxConcurrentReconciles,

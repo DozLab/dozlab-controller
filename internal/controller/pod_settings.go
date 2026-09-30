@@ -4,6 +4,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net/url"
 	"os"
 
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -26,6 +27,16 @@ type PodSettings struct {
 	// StorageClass is the StorageClass for the session PVCs. Empty uses the
 	// cluster's default StorageClass.
 	StorageClass string
+
+	// IngressClass is the IngressClass of each session's Ingress (Traefik on k3s).
+	IngressClass string
+	// IngressMiddleware is a Traefik Middleware reference ("<namespace>-<name>@kubernetescrd")
+	// that strips the /sessions/<id>/<app> prefix. It must be in the sessions' namespace.
+	// Empty sets no middleware annotation.
+	IngressMiddleware string
+	// PublicBaseURL is the public origin that reaches the ingress controller, e.g. the
+	// Tailscale Funnel URL. The session endpoints are built on it; empty gives paths only.
+	PublicBaseURL string
 }
 
 // BindFlags registers the settings as flags. Each flag defaults to its
@@ -43,6 +54,12 @@ func (s *PodSettings) BindFlags(fs *flag.FlagSet) {
 		"Size the VM rootfs is grown to (env DOZLAB_VM_DISK_SIZE).")
 	fs.StringVar(&s.StorageClass, "storage-class", os.Getenv("DOZLAB_STORAGE_CLASS"),
 		"StorageClass for session PVCs (env DOZLAB_STORAGE_CLASS). Empty uses the cluster default.")
+	fs.StringVar(&s.IngressClass, "ingress-class", envOr("DOZLAB_INGRESS_CLASS", "traefik"),
+		"IngressClass for session Ingresses (env DOZLAB_INGRESS_CLASS).")
+	fs.StringVar(&s.IngressMiddleware, "ingress-middleware", os.Getenv("DOZLAB_INGRESS_MIDDLEWARE"),
+		"Traefik Middleware that strips the session path prefix, as <namespace>-<name>@kubernetescrd (env DOZLAB_INGRESS_MIDDLEWARE).")
+	fs.StringVar(&s.PublicBaseURL, "public-base-url", os.Getenv("DOZLAB_PUBLIC_BASE_URL"),
+		"Public URL of the ingress controller, used in session endpoints (env DOZLAB_PUBLIC_BASE_URL). Empty gives paths only.")
 }
 
 // Validate reports missing or malformed settings.
@@ -64,6 +81,11 @@ func (s PodSettings) Validate() error {
 		errs = append(errs, fmt.Errorf("invalid vm disk size %q: %w", s.VMDiskSize, err))
 	} else if q.Value() < 1<<20 {
 		errs = append(errs, fmt.Errorf("vm disk size %q is below 1Mi", s.VMDiskSize))
+	}
+	if s.PublicBaseURL != "" {
+		if u, err := url.Parse(s.PublicBaseURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			errs = append(errs, fmt.Errorf("public base url %q must be an http(s) URL", s.PublicBaseURL))
+		}
 	}
 	return errors.Join(errs...)
 }

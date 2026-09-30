@@ -131,9 +131,23 @@ at startup if any is missing.
 | `--ssh-user` | `DOZLAB_SSH_USER` | `root` | User the terminal sidecar logs into the VM as |
 | `--vm-disk-size` | `DOZLAB_VM_DISK_SIZE` | `4Gi` | Size the rootfs is grown to; the `vm-kernels` volume is sized at twice this |
 | `--storage-class` | `DOZLAB_STORAGE_CLASS` | cluster default | StorageClass for the session PVCs |
+| `--ingress-class` | `DOZLAB_INGRESS_CLASS` | `traefik` | IngressClass of each session's Ingress |
+| `--ingress-middleware` | `DOZLAB_INGRESS_MIDDLEWARE` | none | Traefik Middleware that strips `/sessions/<id>/<app>`, as `<namespace>-<name>@kubernetescrd` |
+| `--public-base-url` | `DOZLAB_PUBLIC_BASE_URL` | none (paths only) | Public URL of the ingress controller; the session endpoints are built on it |
 
 A LabSession's `customImages.initrdImage` / `terminalImage` override the VM and terminal
 images for that session.
+
+### Per-session Ingress
+
+Each session gets an Ingress `lab-ingress-<sessionId>`, owned by the LabSession, that
+routes `/sessions/<sessionId>/vscode` to code-server (8080) and `/sessions/<sessionId>/terminal`
+to the terminal sidecar (8081). Both apps serve from `/`, so the path prefix must be stripped:
+apply `deploy/session-ingress-middleware.yaml` in the namespace the sessions run in and set
+`DOZLAB_INGRESS_MIDDLEWARE` to it (Traefik only uses Middlewares from the Ingress's own
+namespace). The session's `status.endpoints` are `<public-base-url>/sessions/<id>/vscode/` and
+`.../terminal/`; keep the trailing slash. Why Traefik and not the API: dozlab-api
+`docs/decision.md`, "frontend on GitHub Pages".
 
 ### Per-session SSH keys
 
