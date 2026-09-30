@@ -78,21 +78,16 @@ func TestBuildPod(t *testing.T) {
 			wantCPUReq:    "1",
 		},
 		{
-			name: "custom images, password and resources",
+			name: "password and resources",
 			spec: LabSessionSpec{
 				UserID:    "u2",
 				SessionID: "s2",
 				Resources: ResourceConfig{Memory: "8Gi", CPU: "4"},
 				Config:    SessionConfig{VSCodePassword: "secret"},
-				CustomImages: ImageConfig{
-					InitrdImage:   "vm:1",
-					TerminalImage: "term:1",
-					VSCodeImage:   "code:1",
-				},
 			},
-			wantVMImage:   "vm:1",
-			wantTermImage: "term:1",
-			wantCodeImage: "code:1",
+			wantVMImage:   "dozlab-firecracker:test",
+			wantTermImage: "dozlab-terminal:test",
+			wantCodeImage: VSCodeImage,
 			wantPassword:  "secret",
 			wantMemLimit:  "8Gi",
 			wantCPULimit:  "4",
@@ -614,6 +609,26 @@ func TestVMKernelsSizeLimit(t *testing.T) {
 	got := vmKernelsSizeLimit(resource.MustParse("4Gi"))
 	if got.Cmp(resource.MustParse("8Gi")) != 0 {
 		t.Errorf("vmKernelsSizeLimit(4Gi) = %s, want 8Gi", got.String())
+	}
+}
+
+func TestInitImagePerLab(t *testing.T) {
+	rb := NewResourceBuilder(testSettings)
+	for _, tc := range []struct {
+		name, initImage, want string
+	}{
+		{"no lab image uses the controller default", "", testSettings.InitImage},
+		{"the lab's image wins", "dozlab-init-k8s:1", "dozlab-init-k8s:1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pod := rb.BuildPod(newSession(LabSessionSpec{
+				SessionID:    "demo",
+				CustomImages: ImageConfig{InitImage: tc.initImage},
+			}))
+			if got := findContainer(t, pod.Spec.InitContainers, "init-rootfs").Image; got != tc.want {
+				t.Errorf("init-rootfs image = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

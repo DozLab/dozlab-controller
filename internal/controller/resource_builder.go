@@ -93,9 +93,13 @@ func (rb *ResourceBuilder) BuildPod(session *LabSession) *corev1.Pod {
 // writes the session's cloud-init seed (root's SSH key) into it
 func (rb *ResourceBuilder) buildRootfsInitContainer(session *LabSession) corev1.Container {
 	sessionID := session.Spec.SessionID
+	initImage := rb.settings.InitImage
+	if session.Spec.CustomImages.InitImage != "" {
+		initImage = session.Spec.CustomImages.InitImage
+	}
 	return corev1.Container{
 		Name:  "init-rootfs",
-		Image: rb.settings.InitImage,
+		Image: initImage,
 		Env: []corev1.EnvVar{
 			{Name: "IMAGE_DOWNLOAD_URL", Value: session.Spec.RootfsURL},
 			{Name: "IMAGE_SIZE", Value: resize2fsSize(rb.diskSize())},
@@ -131,9 +135,6 @@ func (rb *ResourceBuilder) buildNetworkSetupContainer() corev1.Container {
 func (rb *ResourceBuilder) buildVMContainer(session *LabSession, resourceLimits ResourceConfig) corev1.Container {
 	sessionID := session.Spec.SessionID
 	vmImage := rb.settings.VMImage
-	if session.Spec.CustomImages.InitrdImage != "" {
-		vmImage = session.Spec.CustomImages.InitrdImage
-	}
 
 	return corev1.Container{
 		Name:  "firecracker-vm",
@@ -189,9 +190,6 @@ func (rb *ResourceBuilder) buildVMContainer(session *LabSession, resourceLimits 
 func (rb *ResourceBuilder) buildTerminalContainer(session *LabSession) corev1.Container {
 	sessionID := session.Spec.SessionID
 	terminalImage := rb.settings.TerminalImage
-	if session.Spec.CustomImages.TerminalImage != "" {
-		terminalImage = session.Spec.CustomImages.TerminalImage
-	}
 
 	return corev1.Container{
 		Name:  "terminal-sidecar",
@@ -256,9 +254,6 @@ func (rb *ResourceBuilder) buildTerminalContainer(session *LabSession) corev1.Co
 func (rb *ResourceBuilder) buildVSCodeContainer(session *LabSession) corev1.Container {
 	sessionID := session.Spec.SessionID
 	vscodeImage := VSCodeImage
-	if session.Spec.CustomImages.VSCodeImage != "" {
-		vscodeImage = session.Spec.CustomImages.VSCodeImage
-	}
 
 	password := "changeme"
 	if session.Spec.Config.VSCodePassword != "" {

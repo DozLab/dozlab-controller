@@ -135,8 +135,10 @@ at startup if any is missing.
 | `--ingress-middleware` | `DOZLAB_INGRESS_MIDDLEWARE` | none | Traefik Middleware that strips `/sessions/<id>/<app>`, as `<namespace>-<name>@kubernetescrd` |
 | `--public-base-url` | `DOZLAB_PUBLIC_BASE_URL` | none (paths only) | Public URL of the ingress controller; the session endpoints are built on it |
 
-A LabSession's `customImages.initrdImage` / `terminalImage` override the VM and terminal
-images for that session.
+A LabSession's `customImages.initImage` is its lab's init image: the API sets it from the lab
+(`labs.init_image`), so each session boots its lab's rootfs (`dozlab-init-<lab>` from
+dozlab-rootfs-manager). `--init-image` is the default for labs without one. The VM, terminal and
+VS Code images come only from the controller settings.
 
 ### Per-session Ingress
 

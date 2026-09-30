@@ -25,7 +25,7 @@ type LabSessionSpec struct {
 	Timeout string `json:"timeout,omitempty"`
 	// RootfsURL defines the custom rootfs image URL (optional)
 	RootfsURL string `json:"rootfsUrl,omitempty"`
-	// CustomImages allows overriding default container images
+	// CustomImages holds the lab's own images (today only its init image)
 	CustomImages ImageConfig `json:"customImages,omitempty"`
 }
 
@@ -46,9 +46,9 @@ type SessionConfig struct {
 
 // ImageConfig allows customization of container images
 type ImageConfig struct {
-	InitrdImage   string `json:"initrdImage,omitempty"`
-	TerminalImage string `json:"terminalImage,omitempty"`
-	VSCodeImage   string `json:"vscodeImage,omitempty"`
+	// InitImage is the init container with the lab's VM rootfs (dozlab-init-<lab>);
+	// the API sets it from the lab, so each session boots the lab it asked for.
+	InitImage string `json:"initImage,omitempty"`
 }
 
 // LabSessionStatus defines the observed state of a lab session
