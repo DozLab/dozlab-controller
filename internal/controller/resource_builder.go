@@ -89,8 +89,10 @@ func (rb *ResourceBuilder) BuildPod(session *LabSession) *corev1.Pod {
 	return pod
 }
 
-// buildRootfsInitContainer writes the VM rootfs into the vm-kernels volume and grows it
+// buildRootfsInitContainer writes the VM rootfs into the vm-kernels volume, grows it, and
+// writes the session's cloud-init seed (root's SSH key) into it
 func (rb *ResourceBuilder) buildRootfsInitContainer(session *LabSession) corev1.Container {
+	sessionID := session.Spec.SessionID
 	return corev1.Container{
 		Name:  "init-rootfs",
 		Image: rb.settings.InitImage,
@@ -98,6 +100,8 @@ func (rb *ResourceBuilder) buildRootfsInitContainer(session *LabSession) corev1.
 			{Name: "IMAGE_DOWNLOAD_URL", Value: session.Spec.RootfsURL},
 			{Name: "IMAGE_SIZE", Value: resize2fsSize(rb.diskSize())},
 			{Name: "IMAGE_PATH", Value: VMRootfsPath},
+			{Name: "SESSION_ID", Value: sessionID},
+			sshKeyEnv("SSH_AUTHORIZED_KEY", sessionID, SSHPublicKeyKey),
 		},
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: "vm-kernels", MountPath: VMKernelsPath},
@@ -229,15 +233,7 @@ func (rb *ResourceBuilder) buildTerminalContainer(session *LabSession) corev1.Co
 			{Name: "VM_IP", Value: VMIP},
 			{Name: "VM_SSH_PORT", Value: strconv.Itoa(VMSSHPort)},
 			{Name: "SSH_USER", Value: rb.settings.SSHUser},
-			{
-				Name: "SSH_PRIVATE_KEY",
-				ValueFrom: &corev1.EnvVarSource{
-					SecretKeyRef: &corev1.SecretKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{Name: rb.settings.SSHKeySecret},
-						Key:                  rb.settings.SSHKeySecretKey,
-					},
-				},
-			},
+			sshKeyEnv("SSH_PRIVATE_KEY", sessionID, SSHPrivateKeyKey),
 		},
 		Resources: corev1.ResourceRequirements{
 			Limits: corev1.ResourceList{
@@ -545,6 +541,19 @@ func vmKernelsSizeLimit(disk resource.Quantity) resource.Quantity {
 // rather than Kubernetes quantities. It rounds down to whole MiB.
 func resize2fsSize(q resource.Quantity) string {
 	return fmt.Sprintf("%dM", q.Value()>>20)
+}
+
+// sshKeyEnv sets env var name from one key of the session's SSH key Secret
+func sshKeyEnv(name, sessionID, key string) corev1.EnvVar {
+	return corev1.EnvVar{
+		Name: name,
+		ValueFrom: &corev1.EnvVarSource{
+			SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: SSHKeySecretName(sessionID)},
+				Key:                  key,
+			},
+		},
+	}
 }
 
 func resourcePtr(q resource.Quantity) *resource.Quantity {

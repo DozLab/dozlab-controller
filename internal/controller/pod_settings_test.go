@@ -7,13 +7,11 @@ import (
 
 func TestPodSettingsValidate(t *testing.T) {
 	valid := PodSettings{
-		VMImage:         "vm:1",
-		InitImage:       "init:1",
-		TerminalImage:   "term:1",
-		SSHKeySecret:    "lab-ssh-key",
-		SSHKeySecretKey: "id_ed25519",
-		SSHUser:         "root",
-		VMDiskSize:      "4Gi",
+		VMImage:       "vm:1",
+		InitImage:     "init:1",
+		TerminalImage: "term:1",
+		SSHUser:       "root",
+		VMDiskSize:    "4Gi",
 	}
 
 	testCases := []struct {
@@ -25,7 +23,6 @@ func TestPodSettingsValidate(t *testing.T) {
 		{"missing VMImage", func(s *PodSettings) { s.VMImage = "" }, "vm image is required"},
 		{"missing InitImage", func(s *PodSettings) { s.InitImage = "" }, "init image is required"},
 		{"missing TerminalImage", func(s *PodSettings) { s.TerminalImage = "" }, "terminal image is required"},
-		{"empty SSHKeySecret", func(s *PodSettings) { s.SSHKeySecret = "" }, "ssh key secret"},
 		{"empty SSHUser", func(s *PodSettings) { s.SSHUser = "" }, "ssh user is required"},
 		{"unparsable VMDiskSize", func(s *PodSettings) { s.VMDiskSize = "lots" }, "invalid vm disk size"},
 		{"tiny VMDiskSize", func(s *PodSettings) { s.VMDiskSize = "100Ki" }, "below 1Mi"},

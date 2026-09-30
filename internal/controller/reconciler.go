@@ -169,18 +169,29 @@ func (r *LabSessionReconciler) reconcileCreating(ctx context.Context, session *L
 		return r.handleCreateError(ctx, session, "Failed to create PVCs", err)
 	}
 
-	// Step 2: Create Pod. Don't wait for the PVCs to be bound first: with a
+	// Step 2: Create the session's SSH key Secret, which the pod's init container and
+	// terminal sidecar read.
+	created, err := EnsureSSHKeySecret(ctx, r.Client, r.Scheme, session, session.Spec.SessionID, session.Namespace)
+	if err != nil {
+		r.updateStatusFailed(ctx, session, "Failed to create SSH key Secret", err)
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, err
+	}
+	if created {
+		r.Recorder.Eventf(session, corev1.EventTypeNormal, "SSHKeyCreated", "Created SSH key Secret %s", SSHKeySecretName(session.Spec.SessionID))
+	}
+
+	// Step 3: Create Pod. Don't wait for the PVCs to be bound first: with a
 	// WaitForFirstConsumer StorageClass they only bind once this pod is scheduled.
 	if err := r.ensurePod(ctx, session); err != nil {
 		return r.handleCreateError(ctx, session, "Failed to create Pod", err)
 	}
 
-	// Step 3: Create Service
+	// Step 4: Create Service
 	if err := r.ensureService(ctx, session); err != nil {
 		return r.handleCreateError(ctx, session, "Failed to create Service", err)
 	}
 
-	// Step 4: Check if pod is running
+	// Step 5: Check if pod is running
 	pod := &corev1.Pod{}
 	if err := r.Get(ctx, types.NamespacedName{Name: session.Status.PodName, Namespace: session.Namespace}, pod); err != nil {
 		// Also NotFound while the cache catches up with the create above.
