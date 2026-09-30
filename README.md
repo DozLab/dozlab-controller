@@ -128,14 +128,22 @@ at startup if any is missing.
 | `--vm-image` | `DOZLAB_VM_IMAGE` | required | Firecracker image (dozlab-infra); its own entrypoint boots the VM |
 | `--init-image` | `DOZLAB_INIT_IMAGE` | required | Rootfs init image (dozlab-rootfs-manager `init-setup`) |
 | `--terminal-image` | `DOZLAB_TERMINAL_IMAGE` | required | Terminal sidecar image (dozlab-terminal-sidecar) |
-| `--ssh-key-secret` | `DOZLAB_SSH_KEY_SECRET` | `lab-ssh-key` | Secret in the session namespace with the VM's SSH private key |
-| `--ssh-key-secret-key` | `DOZLAB_SSH_KEY_SECRET_KEY` | `id_ed25519` | Key inside that Secret |
 | `--ssh-user` | `DOZLAB_SSH_USER` | `root` | User the terminal sidecar logs into the VM as |
 | `--vm-disk-size` | `DOZLAB_VM_DISK_SIZE` | `4Gi` | Size the rootfs is grown to; the `vm-kernels` volume is sized at twice this |
 | `--storage-class` | `DOZLAB_STORAGE_CLASS` | cluster default | StorageClass for the session PVCs |
 
 A LabSession's `customImages.initrdImage` / `terminalImage` override the VM and terminal
 images for that session.
+
+### Per-session SSH keys
+
+The controller creates an ed25519 key pair for every session, in a Secret
+`lab-session-<sessionId>-ssh` (keys `id_ed25519` and `id_ed25519.pub`) owned by the
+LabSession, so it's deleted with it. The public key goes to the `init-rootfs` container as
+`SSH_AUTHORIZED_KEY`, which writes it into the VM's cloud-init seed (dozlab-rootfs-manager
+`init-setup`); the private key goes to the terminal sidecar as `SSH_PRIVATE_KEY`. The private
+key is in OpenSSH format, so `ssh -i` can use it too. The controller only creates Secrets and
+never reads them, so it needs `create` on `secrets` and nothing more.
 
 Example for a local cluster with locally built images:
 

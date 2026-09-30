@@ -9,19 +9,27 @@ import (
 )
 
 var testSettings = PodSettings{
-	VMImage:         "dozlab-firecracker:test",
-	InitImage:       "dozlab-init:test",
-	TerminalImage:   "dozlab-terminal:test",
-	SSHKeySecret:    "lab-ssh-key",
-	SSHKeySecretKey: "id_ed25519",
-	SSHUser:         "root",
-	VMDiskSize:      "4Gi",
+	VMImage:       "dozlab-firecracker:test",
+	InitImage:     "dozlab-init:test",
+	TerminalImage: "dozlab-terminal:test",
+	SSHUser:       "root",
+	VMDiskSize:    "4Gi",
 }
 
 func newSession(spec LabSessionSpec) *LabSession {
 	s := &LabSession{Spec: spec}
 	s.Namespace = "labs"
 	return s
+}
+
+// secretRef returns the Secret reference of env var name in c, or nil.
+func secretRef(c corev1.Container, name string) *corev1.SecretKeySelector {
+	for _, e := range c.Env {
+		if e.Name == name && e.ValueFrom != nil {
+			return e.ValueFrom.SecretKeyRef
+		}
+	}
+	return nil
 }
 
 func findContainer(t *testing.T, containers []corev1.Container, name string) corev1.Container {
@@ -538,7 +546,7 @@ func TestBuildPodMatchesReference(t *testing.T) {
 		t.Error("vm-kernels volume not found")
 	})
 
-	t.Run("terminal gets ssh user and key from secret", func(t *testing.T) {
+	t.Run("terminal gets ssh user and the session's private key", func(t *testing.T) {
 		term := findContainer(t, pod.Spec.Containers, "terminal-sidecar")
 		if got, _ := envValue(term, "SSH_USER"); got != "root" {
 			t.Errorf("SSH_USER = %q, want root", got)
@@ -546,14 +554,18 @@ func TestBuildPodMatchesReference(t *testing.T) {
 		if got, _ := envValue(term, "VM_IP"); got != "172.16.0.2" {
 			t.Errorf("terminal VM_IP = %q, want 172.16.0.2", got)
 		}
-		var ref *corev1.SecretKeySelector
-		for _, e := range term.Env {
-			if e.Name == "SSH_PRIVATE_KEY" && e.ValueFrom != nil {
-				ref = e.ValueFrom.SecretKeyRef
-			}
+		if ref := secretRef(term, "SSH_PRIVATE_KEY"); ref == nil || ref.Name != "lab-session-demo-ssh" || ref.Key != "id_ed25519" {
+			t.Errorf("SSH_PRIVATE_KEY secretKeyRef = %+v, want lab-session-demo-ssh/id_ed25519", ref)
 		}
-		if ref == nil || ref.Name != "lab-ssh-key" || ref.Key != "id_ed25519" {
-			t.Errorf("SSH_PRIVATE_KEY secretKeyRef = %+v, want lab-ssh-key/id_ed25519", ref)
+	})
+
+	t.Run("init-rootfs gets the session's public key for the cloud-init seed", func(t *testing.T) {
+		init := findContainer(t, pod.Spec.InitContainers, "init-rootfs")
+		if ref := secretRef(init, "SSH_AUTHORIZED_KEY"); ref == nil || ref.Name != "lab-session-demo-ssh" || ref.Key != "id_ed25519.pub" {
+			t.Errorf("SSH_AUTHORIZED_KEY secretKeyRef = %+v, want lab-session-demo-ssh/id_ed25519.pub", ref)
+		}
+		if got, _ := envValue(init, "SESSION_ID"); got != "demo" {
+			t.Errorf("init SESSION_ID = %q, want demo", got)
 		}
 	})
 

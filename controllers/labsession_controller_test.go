@@ -13,13 +13,11 @@ import (
 func TestBuildPodDelegatesToSharedBuilder(t *testing.T) {
 	r := &LabSessionReconciler{
 		ResourceBuilder: labcontroller.NewResourceBuilder(labcontroller.PodSettings{
-			VMImage:         "dozlab-firecracker:test",
-			InitImage:       "dozlab-init:test",
-			TerminalImage:   "dozlab-terminal:test",
-			SSHKeySecret:    "lab-ssh-key",
-			SSHKeySecretKey: "id_ed25519",
-			SSHUser:         "root",
-			VMDiskSize:      "4Gi",
+			VMImage:       "dozlab-firecracker:test",
+			InitImage:     "dozlab-init:test",
+			TerminalImage: "dozlab-terminal:test",
+			SSHUser:       "root",
+			VMDiskSize:    "4Gi",
 		}),
 	}
 	labSession := &unstructured.Unstructured{}

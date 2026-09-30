@@ -12,6 +12,10 @@ rules:
 - apiGroups: [""]
   resources: ["pods", "services"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+# Per-session SSH key Secrets: create only (the controller never reads Secrets back)
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["create"]
 - apiGroups: ["dozlab.io"]
   resources: ["labsessions"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]

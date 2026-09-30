@@ -166,6 +166,10 @@ func (r *LabSessionReconciler) reconcilePod(ctx context.Context, labSession *uns
 	}, pod)
 
 	if err != nil && errors.IsNotFound(err) {
+		// The pod's init container and terminal sidecar read the session's SSH key Secret
+		if _, err := labcontroller.EnsureSSHKeySecret(ctx, r.Client, r.Scheme, labSession, sessionID, labSession.GetNamespace()); err != nil {
+			return nil, err
+		}
 		// Create new pod
 		pod, err = r.buildPod(labSession, spec)
 		if err != nil {
