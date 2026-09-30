@@ -2,12 +2,14 @@ package controller
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -32,7 +34,30 @@ const (
 	publishRetryDelay = 30 * time.Second
 	// terminatingPublishTimeout bounds the best-effort publish during deletion.
 	terminatingPublishTimeout = 5 * time.Second
+
+	// creatingTimeout bounds retries of transient errors while creating the
+	// session's resources, counted from Status.StartTime.
+	creatingTimeout = 10 * time.Minute
+	// podUnreadyTimeout is how long a Running session's pod may stay not ready
+	// before the session fails.
+	podUnreadyTimeout = 2 * time.Minute
 )
+
+// notOwnedError reports an existing object with the session's resource name
+// that the session doesn't control.
+type notOwnedError struct {
+	kind, name string
+}
+
+func (e *notOwnedError) Error() string {
+	return fmt.Sprintf("%s %s exists and is not owned by this session", e.kind, e.name)
+}
+
+// isPermanentCreateError reports whether retrying the create can't help.
+func isPermanentCreateError(err error) bool {
+	var notOwned *notOwnedError
+	return stderrors.As(err, &notOwned) || errors.IsInvalid(err) || errors.IsBadRequest(err)
+}
 
 // LabSessionReconciler reconciles a LabSession object
 type LabSessionReconciler struct {
@@ -141,8 +166,7 @@ func (r *LabSessionReconciler) reconcileCreating(ctx context.Context, session *L
 
 	// Step 1: Create PVCs
 	if err := r.ensurePVCs(ctx, session); err != nil {
-		r.updateStatusFailed(ctx, session, "Failed to create PVCs", err)
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, err
+		return r.handleCreateError(ctx, session, "Failed to create PVCs", err)
 	}
 
 	// Step 2: Create the session's SSH key Secret, which the pod's init container and
@@ -159,22 +183,26 @@ func (r *LabSessionReconciler) reconcileCreating(ctx context.Context, session *L
 	// Step 3: Create Pod. Don't wait for the PVCs to be bound first: with a
 	// WaitForFirstConsumer StorageClass they only bind once this pod is scheduled.
 	if err := r.ensurePod(ctx, session); err != nil {
-		r.updateStatusFailed(ctx, session, "Failed to create Pod", err)
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, err
+		return r.handleCreateError(ctx, session, "Failed to create Pod", err)
 	}
 
 	// Step 4: Create Service
 	if err := r.ensureService(ctx, session); err != nil {
-		r.updateStatusFailed(ctx, session, "Failed to create Service", err)
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, err
+		return r.handleCreateError(ctx, session, "Failed to create Service", err)
 	}
 
 	// Step 5: Check if pod is running
-	podReady, podIP, err := r.checkPodReady(ctx, session)
-	if err != nil {
+	pod := &corev1.Pod{}
+	if err := r.Get(ctx, types.NamespacedName{Name: session.Status.PodName, Namespace: session.Namespace}, pod); err != nil {
+		// Also NotFound while the cache catches up with the create above.
 		logger.Error(err, "Failed to check pod status")
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, err
 	}
+	if reason := podTerminalReason(pod); reason != "" {
+		r.updateStatusFailed(ctx, session, "Pod failed", stderrors.New(reason))
+		return ctrl.Result{}, nil
+	}
+	podReady, podIP := isPodReady(pod), pod.Status.PodIP
 
 	if podReady {
 		// Pod is ready, transition to Running
@@ -213,21 +241,94 @@ func (r *LabSessionReconciler) reconcileRunning(ctx context.Context, session *La
 	logger := log.FromContext(ctx)
 	logger.Info("Reconciling Running phase")
 
-	// Check if pod is still running
-	podReady, _, err := r.checkPodReady(ctx, session)
-	if err != nil {
+	pod := &corev1.Pod{}
+	err := r.Get(ctx, types.NamespacedName{Name: session.Status.PodName, Namespace: session.Namespace}, pod)
+	if session.Status.PodName == "" || errors.IsNotFound(err) {
+		logger.Info("Pod is gone, transitioning to Failed")
+		r.updateStatusFailed(ctx, session, "Pod failed", stderrors.New("pod was deleted"))
+		return ctrl.Result{}, nil
+	} else if err != nil {
 		logger.Error(err, "Failed to check pod status")
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, err
 	}
 
-	if !podReady {
-		logger.Info("Pod is no longer ready, transitioning to Failed")
-		r.updateStatusFailed(ctx, session, "Pod failed", fmt.Errorf("pod is no longer ready"))
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	// The pod never restarts containers, so a terminated pod or container is final.
+	if reason := podTerminalReason(pod); reason != "" {
+		logger.Info("Pod has stopped, transitioning to Failed", "reason", reason)
+		r.updateStatusFailed(ctx, session, "Pod failed", stderrors.New(reason))
+		return ctrl.Result{}, nil
 	}
 
-	// Session is healthy, reconcile again after some time
-	return ctrl.Result{RequeueAfter: 1 * time.Minute}, nil
+	if isPodReady(pod) {
+		if !meta.IsStatusConditionTrue(session.Status.Conditions, ConditionTypePodReady) {
+			r.setCondition(session, ConditionTypePodReady, metav1.ConditionTrue, "PodRunning", "Pod is running")
+			if err := r.Status().Update(ctx, session); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		// Session is healthy, reconcile again after some time
+		return ctrl.Result{RequeueAfter: 1 * time.Minute}, nil
+	}
+
+	// Not ready but still running (e.g. a failing readiness probe): give it
+	// podUnreadyTimeout to recover before failing the session.
+	if meta.IsStatusConditionTrue(session.Status.Conditions, ConditionTypePodReady) {
+		r.setCondition(session, ConditionTypePodReady, metav1.ConditionFalse, "PodNotReady", "Pod is not ready")
+		if err := r.Status().Update(ctx, session); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+	if cond := meta.FindStatusCondition(session.Status.Conditions, ConditionTypePodReady); cond != nil &&
+		time.Since(cond.LastTransitionTime.Time) > podUnreadyTimeout {
+		logger.Info("Pod not ready for too long, transitioning to Failed")
+		r.updateStatusFailed(ctx, session, "Pod failed", fmt.Errorf("pod not ready for over %s", podUnreadyTimeout))
+		return ctrl.Result{}, nil
+	}
+	logger.Info("Pod is not ready, waiting for it to recover")
+	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+}
+
+// handleCreateError fails the session on a permanent error or once
+// creatingTimeout has passed; otherwise it returns the error so the create is
+// retried with backoff.
+func (r *LabSessionReconciler) handleCreateError(ctx context.Context, session *LabSession, message string, err error) (ctrl.Result, error) {
+	expired := session.Status.StartTime != nil && time.Since(session.Status.StartTime.Time) > creatingTimeout
+	if isPermanentCreateError(err) || expired {
+		r.updateStatusFailed(ctx, session, message, err)
+		return ctrl.Result{}, nil
+	}
+	log.FromContext(ctx).Error(err, message+"; will retry")
+	return ctrl.Result{}, err
+}
+
+// podTerminalReason returns why the pod can no longer serve the session, or ""
+// if it can.
+func podTerminalReason(pod *corev1.Pod) string {
+	if pod.DeletionTimestamp != nil {
+		return "pod is being deleted"
+	}
+	if pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodSucceeded {
+		return fmt.Sprintf("pod phase is %s", pod.Status.Phase)
+	}
+	for _, cs := range pod.Status.ContainerStatuses {
+		if t := cs.State.Terminated; t != nil {
+			return fmt.Sprintf("container %s exited (%s, code %d)", cs.Name, t.Reason, t.ExitCode)
+		}
+	}
+	return ""
+}
+
+// isPodReady reports whether the pod is running and all its containers are ready.
+func isPodReady(pod *corev1.Pod) bool {
+	if pod.Status.Phase != corev1.PodRunning {
+		return false
+	}
+	for _, condition := range pod.Status.Conditions {
+		if condition.Type == corev1.PodReady && condition.Status == corev1.ConditionTrue {
+			return true
+		}
+	}
+	return false
 }
 
 // reconcileFailed handles the Failed phase
@@ -247,7 +348,12 @@ func (r *LabSessionReconciler) reconcileDelete(ctx context.Context, session *Lab
 	// Update status to Terminating
 	session.Status.Phase = SessionPhaseTerminating
 	session.Status.Message = "Cleaning up lab session resources"
-	if err := r.Status().Update(ctx, session); err != nil {
+	if err := r.Status().Update(ctx, session); errors.IsNotFound(err) {
+		// A queued reconcile read the session from the cache after an earlier
+		// one had already removed the finalizer; deletion is done.
+		logger.Info("LabSession already deleted")
+		return ctrl.Result{}, nil
+	} else if err != nil {
 		logger.Error(err, "Failed to update status to Terminating")
 		// Continue with deletion anyway
 	}
@@ -265,7 +371,7 @@ func (r *LabSessionReconciler) reconcileDelete(ctx context.Context, session *Lab
 
 	// Remove finalizer
 	controllerutil.RemoveFinalizer(session, LabSessionFinalizer)
-	if err := r.Update(ctx, session); err != nil {
+	if err := r.Update(ctx, session); err != nil && !errors.IsNotFound(err) {
 		logger.Error(err, "Failed to remove finalizer")
 		return ctrl.Result{}, err
 	}
@@ -337,12 +443,18 @@ func (r *LabSessionReconciler) ensurePVCs(ctx context.Context, session *LabSessi
 		err := r.Get(ctx, types.NamespacedName{Name: pvc.Name, Namespace: pvc.Namespace}, found)
 		if err != nil && errors.IsNotFound(err) {
 			logger.Info("Creating PVC", "name", pvc.Name)
-			if err := r.Create(ctx, pvc); err != nil {
+			if err := r.Create(ctx, pvc); errors.IsAlreadyExists(err) {
+				// The cache hadn't seen our earlier create yet.
+				logger.Info("PVC already exists", "name", pvc.Name)
+			} else if err != nil {
 				return fmt.Errorf("failed to create PVC %s: %w", pvc.Name, err)
+			} else {
+				r.Recorder.Eventf(session, corev1.EventTypeNormal, "PVCCreated", "Created PVC %s", pvc.Name)
 			}
-			r.Recorder.Eventf(session, corev1.EventTypeNormal, "PVCCreated", "Created PVC %s", pvc.Name)
 		} else if err != nil {
 			return fmt.Errorf("failed to get PVC %s: %w", pvc.Name, err)
+		} else if !metav1.IsControlledBy(found, session) {
+			return &notOwnedError{kind: "PVC", name: pvc.Name}
 		}
 	}
 
@@ -364,13 +476,19 @@ func (r *LabSessionReconciler) ensurePod(ctx context.Context, session *LabSessio
 	err := r.Get(ctx, types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, found)
 	if err != nil && errors.IsNotFound(err) {
 		logger.Info("Creating Pod", "name", pod.Name)
-		if err := r.Create(ctx, pod); err != nil {
+		if err := r.Create(ctx, pod); errors.IsAlreadyExists(err) {
+			// The cache hadn't seen our earlier create yet.
+			logger.Info("Pod already exists", "name", pod.Name)
+		} else if err != nil {
 			return fmt.Errorf("failed to create pod: %w", err)
+		} else {
+			r.Recorder.Eventf(session, corev1.EventTypeNormal, "PodCreated", "Created Pod %s", pod.Name)
 		}
 		session.Status.PodName = pod.Name
-		r.Recorder.Eventf(session, corev1.EventTypeNormal, "PodCreated", "Created Pod %s", pod.Name)
 	} else if err != nil {
 		return fmt.Errorf("failed to get pod: %w", err)
+	} else if !metav1.IsControlledBy(found, session) {
+		return &notOwnedError{kind: "Pod", name: pod.Name}
 	} else {
 		session.Status.PodName = found.Name
 	}
@@ -393,45 +511,24 @@ func (r *LabSessionReconciler) ensureService(ctx context.Context, session *LabSe
 	err := r.Get(ctx, types.NamespacedName{Name: service.Name, Namespace: service.Namespace}, found)
 	if err != nil && errors.IsNotFound(err) {
 		logger.Info("Creating Service", "name", service.Name)
-		if err := r.Create(ctx, service); err != nil {
+		if err := r.Create(ctx, service); errors.IsAlreadyExists(err) {
+			// The cache hadn't seen our earlier create yet.
+			logger.Info("Service already exists", "name", service.Name)
+		} else if err != nil {
 			return fmt.Errorf("failed to create service: %w", err)
+		} else {
+			r.Recorder.Eventf(session, corev1.EventTypeNormal, "ServiceCreated", "Created Service %s", service.Name)
 		}
 		session.Status.ServiceName = service.Name
-		r.Recorder.Eventf(session, corev1.EventTypeNormal, "ServiceCreated", "Created Service %s", service.Name)
 	} else if err != nil {
 		return fmt.Errorf("failed to get service: %w", err)
+	} else if !metav1.IsControlledBy(found, session) {
+		return &notOwnedError{kind: "Service", name: service.Name}
 	} else {
 		session.Status.ServiceName = found.Name
 	}
 
 	return nil
-}
-
-// checkPodReady checks if the pod is ready and returns its IP
-func (r *LabSessionReconciler) checkPodReady(ctx context.Context, session *LabSession) (bool, string, error) {
-	if session.Status.PodName == "" {
-		return false, "", nil
-	}
-
-	pod := &corev1.Pod{}
-	err := r.Get(ctx, types.NamespacedName{Name: session.Status.PodName, Namespace: session.Namespace}, pod)
-	if err != nil {
-		return false, "", err
-	}
-
-	// Check if pod is running
-	if pod.Status.Phase != corev1.PodRunning {
-		return false, "", nil
-	}
-
-	// Check if all containers are ready
-	for _, condition := range pod.Status.Conditions {
-		if condition.Type == corev1.PodReady && condition.Status == corev1.ConditionTrue {
-			return true, pod.Status.PodIP, nil
-		}
-	}
-
-	return false, pod.Status.PodIP, nil
 }
 
 // updateEndpoints updates the service endpoints in the status
