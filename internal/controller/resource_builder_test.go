@@ -70,7 +70,7 @@ func TestBuildPod(t *testing.T) {
 			spec:          LabSessionSpec{UserID: "u1", SessionID: "s1"},
 			wantVMImage:   "dozlab-firecracker:test",
 			wantTermImage: "dozlab-terminal:test",
-			wantCodeImage: "codercom/code-server:latest",
+			wantCodeImage: VSCodeImage,
 			wantPassword:  "changeme",
 			wantMemLimit:  "4Gi",
 			wantCPULimit:  "2",
@@ -108,7 +108,7 @@ func TestBuildPod(t *testing.T) {
 			},
 			wantVMImage:   "dozlab-firecracker:test",
 			wantTermImage: "dozlab-terminal:test",
-			wantCodeImage: "codercom/code-server:latest",
+			wantCodeImage: VSCodeImage,
 			wantPassword:  "changeme",
 			wantMemLimit:  "16Gi",
 			wantCPULimit:  "8",
@@ -172,6 +172,15 @@ func TestBuildPod(t *testing.T) {
 			code := findContainer(t, pod.Spec.Containers, "code-server")
 			if code.Image != tt.wantCodeImage {
 				t.Errorf("code-server image = %q, want %q", code.Image, tt.wantCodeImage)
+			}
+			netSetup := findContainer(t, pod.Spec.InitContainers, "network-setup")
+			if netSetup.Image != NetworkSetupImage {
+				t.Errorf("network-setup image = %q, want %q", netSetup.Image, NetworkSetupImage)
+			}
+			for _, c := range []corev1.Container{netSetup, code} {
+				if c.ImagePullPolicy != corev1.PullIfNotPresent {
+					t.Errorf("%s pull policy = %q, want IfNotPresent", c.Name, c.ImagePullPolicy)
+				}
 			}
 			if v, _ := envValue(code, "PASSWORD"); v != tt.wantPassword {
 				t.Errorf("code-server PASSWORD = %q, want %q", v, tt.wantPassword)
@@ -605,5 +614,62 @@ func TestVMKernelsSizeLimit(t *testing.T) {
 	got := vmKernelsSizeLimit(resource.MustParse("4Gi"))
 	if got.Cmp(resource.MustParse("8Gi")) != 0 {
 		t.Errorf("vmKernelsSizeLimit(4Gi) = %s, want 8Gi", got.String())
+	}
+}
+
+func TestBuildPodProbes(t *testing.T) {
+	pod := NewResourceBuilder(testSettings).BuildPod(newSession(LabSessionSpec{UserID: "u1", SessionID: "demo"}))
+
+	tests := []struct {
+		container           string
+		wantTCPPort         int
+		wantHTTPPath        string
+		wantReadinessPeriod int32
+	}{
+		{container: "firecracker-vm", wantTCPPort: 22, wantReadinessPeriod: 10},
+		{container: "terminal-sidecar", wantHTTPPath: "/health", wantReadinessPeriod: 5},
+		{container: "code-server", wantHTTPPath: "/healthz", wantReadinessPeriod: 5},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.container, func(t *testing.T) {
+			c := findContainer(t, pod.Spec.Containers, tt.container)
+
+			if c.StartupProbe == nil {
+				t.Fatal("startup probe is nil")
+			}
+			if got := c.StartupProbe.PeriodSeconds; got != 1 {
+				t.Errorf("startup probe period = %d, want 1", got)
+			}
+			if got := c.StartupProbe.FailureThreshold; got != startupProbeBudgetSeconds {
+				t.Errorf("startup probe failure threshold = %d, want %d", got, startupProbeBudgetSeconds)
+			}
+			if tt.wantTCPPort != 0 {
+				if c.StartupProbe.TCPSocket == nil {
+					t.Fatal("startup probe has no TCP check")
+				}
+				if got := c.StartupProbe.TCPSocket.Port.IntValue(); got != tt.wantTCPPort {
+					t.Errorf("startup probe port = %d, want %d", got, tt.wantTCPPort)
+				}
+			} else {
+				if c.StartupProbe.HTTPGet == nil {
+					t.Fatal("startup probe has no HTTP check")
+				}
+				if got := c.StartupProbe.HTTPGet.Path; got != tt.wantHTTPPath {
+					t.Errorf("startup probe path = %q, want %q", got, tt.wantHTTPPath)
+				}
+			}
+
+			// The startup probe gates readiness, so readiness needs no initial delay.
+			if c.ReadinessProbe == nil {
+				t.Fatal("readiness probe is nil")
+			}
+			if got := c.ReadinessProbe.InitialDelaySeconds; got != 0 {
+				t.Errorf("readiness initial delay = %d, want 0", got)
+			}
+			if got := c.ReadinessProbe.PeriodSeconds; got != tt.wantReadinessPeriod {
+				t.Errorf("readiness period = %d, want %d", got, tt.wantReadinessPeriod)
+			}
+		})
 	}
 }

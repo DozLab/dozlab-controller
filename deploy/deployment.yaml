@@ -10,12 +10,15 @@ metadata:
   name: dozlab-controller-role
 rules:
 - apiGroups: [""]
-  resources: ["pods", "services"]
+  resources: ["pods", "services", "persistentvolumeclaims"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 # Per-session SSH key Secrets: create only (the controller never reads Secrets back)
 - apiGroups: [""]
   resources: ["secrets"]
   verbs: ["create"]
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["create", "patch"]
 - apiGroups: ["dozlab.io"]
   resources: ["labsessions"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
