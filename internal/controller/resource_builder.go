@@ -129,9 +129,6 @@ func (rb *ResourceBuilder) buildNetworkSetupContainer() corev1.Container {
 func (rb *ResourceBuilder) buildVMContainer(session *LabSession, resourceLimits ResourceConfig) corev1.Container {
 	sessionID := session.Spec.SessionID
 	vmImage := rb.settings.VMImage
-	if session.Spec.CustomImages.InitrdImage != "" {
-		vmImage = session.Spec.CustomImages.InitrdImage
-	}
 
 	return corev1.Container{
 		Name:  "firecracker-vm",
@@ -190,9 +187,6 @@ func (rb *ResourceBuilder) buildVMContainer(session *LabSession, resourceLimits 
 func (rb *ResourceBuilder) buildTerminalContainer(session *LabSession) corev1.Container {
 	sessionID := session.Spec.SessionID
 	terminalImage := rb.settings.TerminalImage
-	if session.Spec.CustomImages.TerminalImage != "" {
-		terminalImage = session.Spec.CustomImages.TerminalImage
-	}
 
 	return corev1.Container{
 		Name:  "terminal-sidecar",
@@ -252,9 +246,6 @@ func (rb *ResourceBuilder) buildTerminalContainer(session *LabSession) corev1.Co
 func (rb *ResourceBuilder) buildVSCodeContainer(session *LabSession) corev1.Container {
 	sessionID := session.Spec.SessionID
 	vscodeImage := "codercom/code-server:latest"
-	if session.Spec.CustomImages.VSCodeImage != "" {
-		vscodeImage = session.Spec.CustomImages.VSCodeImage
-	}
 
 	password := "changeme"
 	if session.Spec.Config.VSCodePassword != "" {

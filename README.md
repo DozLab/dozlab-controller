@@ -132,10 +132,10 @@ at startup if any is missing.
 | `--vm-disk-size` | `DOZLAB_VM_DISK_SIZE` | `4Gi` | Size the rootfs is grown to; the `vm-kernels` volume is sized at twice this |
 | `--storage-class` | `DOZLAB_STORAGE_CLASS` | cluster default | StorageClass for the session PVCs |
 
-A LabSession's `customImages.initImage` / `initrdImage` / `terminalImage` override the init,
-VM and terminal images for that session. The API sets `initImage` from the lab
+A LabSession's `customImages.initImage` is its lab's init image: the API sets it from the lab
 (`labs.init_image`), so each session boots its lab's rootfs (`dozlab-init-<lab>` from
-dozlab-rootfs-manager); `--init-image` is the default for labs without one.
+dozlab-rootfs-manager). `--init-image` is the default for labs without one. The VM, terminal and
+VS Code images come only from the controller settings.
 
 ### Per-session SSH keys
 
