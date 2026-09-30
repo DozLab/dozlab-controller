@@ -3,7 +3,6 @@ package controller
 import (
 	"fmt"
 	"strconv"
-	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -22,14 +21,26 @@ const (
 	VMKernelsPath   = "/srv/vm/kernels"
 	VMRootfsPath    = VMKernelsPath + "/rootfs.ext4"
 	VMKernelPath    = "/find/vmlinux.bin" // baked into the VM image
-	vmCPUCount      = "1"
-	vmMemoryMiB     = "1024"
 	ipForwardSysctl = "net.ipv4.ip_forward"
 
 	// Public images are pinned by digest and pulled IfNotPresent, so a session
 	// never waits on (or fails at) a registry lookup once the node has them.
 	NetworkSetupImage = "busybox:1.38.0@sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e"
 	VSCodeImage       = "codercom/code-server:4.139.1@sha256:0c067c3cf09ed1830ce282387826be8feefef8a5828f462791c2df3f1007ee17"
+
+	// VM size when the session doesn't set one: the size every VM had before sizes came from
+	// the lab, so sessions without a size don't change.
+	defaultVMCPUs      = 1
+	defaultVMMemoryMiB = 1024
+	maxVMCPUs          = 8
+	minVMMemoryMiB     = 128
+	maxVMMemoryMiB     = 16 * 1024
+
+	// firecrackerOverheadMiB is reserved on top of the VM's memory for the Firecracker process
+	// and start-firecracker.sh (not yet measured on its own). vmContainerCPURequest is small:
+	// idle VMs used 0.2-2.5% of a CPU; the limit lets a busy VM use all of its vCPUs.
+	firecrackerOverheadMiB = 128
+	vmContainerCPURequest  = "100m"
 
 	// KVMResource and TUNResource are the device plugin resources that give
 	// the VM container /dev/kvm and /dev/net/tun without privileged mode.
@@ -52,8 +63,7 @@ func (rb *ResourceBuilder) BuildPod(session *LabSession) *corev1.Pod {
 	sessionID := session.Spec.SessionID
 	podName := fmt.Sprintf("lab-session-%s", sessionID)
 
-	// Get resource limits with defaults
-	resourceLimits := rb.getResourceLimits(session.Spec.Resources)
+	size := rb.vmSize(session)
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -74,15 +84,15 @@ func (rb *ResourceBuilder) BuildPod(session *LabSession) *corev1.Pod {
 				SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 			},
 			InitContainers: []corev1.Container{
-				rb.buildRootfsInitContainer(session),
+				rb.buildRootfsInitContainer(session, size),
 				rb.buildNetworkSetupContainer(),
 			},
 			Containers: []corev1.Container{
-				rb.buildVMContainer(session, resourceLimits),
+				rb.buildVMContainer(session, size),
 				rb.buildTerminalContainer(session),
 				rb.buildVSCodeContainer(session),
 			},
-			Volumes: rb.buildVolumes(sessionID),
+			Volumes: rb.buildVolumes(sessionID, size),
 		},
 	}
 
@@ -91,7 +101,7 @@ func (rb *ResourceBuilder) BuildPod(session *LabSession) *corev1.Pod {
 
 // buildRootfsInitContainer writes the VM rootfs into the vm-kernels volume, grows it, and
 // writes the session's cloud-init seed (root's SSH key) into it
-func (rb *ResourceBuilder) buildRootfsInitContainer(session *LabSession) corev1.Container {
+func (rb *ResourceBuilder) buildRootfsInitContainer(session *LabSession, size vmSize) corev1.Container {
 	sessionID := session.Spec.SessionID
 	initImage := rb.settings.InitImage
 	if session.Spec.CustomImages.InitImage != "" {
@@ -102,7 +112,7 @@ func (rb *ResourceBuilder) buildRootfsInitContainer(session *LabSession) corev1.
 		Image: initImage,
 		Env: []corev1.EnvVar{
 			{Name: "IMAGE_DOWNLOAD_URL", Value: session.Spec.RootfsURL},
-			{Name: "IMAGE_SIZE", Value: resize2fsSize(rb.diskSize())},
+			{Name: "IMAGE_SIZE", Value: resize2fsSize(size.Disk)},
 			{Name: "IMAGE_PATH", Value: VMRootfsPath},
 			{Name: "SESSION_ID", Value: sessionID},
 			sshKeyEnv("SSH_AUTHORIZED_KEY", sessionID, SSHPublicKeyKey),
@@ -132,7 +142,9 @@ func (rb *ResourceBuilder) buildNetworkSetupContainer() corev1.Container {
 // buildVMContainer creates the Firecracker VM container. It runs as root with
 // the image's own entrypoint: as non-root the added capabilities are
 // ineffective and ip tuntap / iptables fail.
-func (rb *ResourceBuilder) buildVMContainer(session *LabSession, resourceLimits ResourceConfig) corev1.Container {
+// buildVMContainer runs Firecracker with the session's VM size. The container reserves the VM's
+// memory plus Firecracker's overhead, and little CPU; its CPU limit is the VM's vCPU count.
+func (rb *ResourceBuilder) buildVMContainer(session *LabSession, size vmSize) corev1.Container {
 	sessionID := session.Spec.SessionID
 	vmImage := rb.settings.VMImage
 
@@ -146,14 +158,14 @@ func (rb *ResourceBuilder) buildVMContainer(session *LabSession, resourceLimits 
 		},
 		Resources: corev1.ResourceRequirements{
 			Limits: corev1.ResourceList{
-				corev1.ResourceMemory: resource.MustParse(resourceLimits.Memory),
-				corev1.ResourceCPU:    resource.MustParse(resourceLimits.CPU),
+				corev1.ResourceMemory: size.containerMemory(),
+				corev1.ResourceCPU:    *resource.NewQuantity(int64(size.CPUs), resource.DecimalSI),
 				KVMResource:           resource.MustParse("1"),
 				TUNResource:           resource.MustParse("1"),
 			},
 			Requests: corev1.ResourceList{
-				corev1.ResourceMemory: resource.MustParse(getMemoryRequest(resourceLimits.Memory)),
-				corev1.ResourceCPU:    resource.MustParse(getCPURequest(resourceLimits.CPU)),
+				corev1.ResourceMemory: size.containerMemory(),
+				corev1.ResourceCPU:    resource.MustParse(vmContainerCPURequest),
 				KVMResource:           resource.MustParse("1"),
 				TUNResource:           resource.MustParse("1"),
 			},
@@ -162,8 +174,8 @@ func (rb *ResourceBuilder) buildVMContainer(session *LabSession, resourceLimits 
 			{Name: "SESSION_ID", Value: sessionID},
 			{Name: "ROOTFS_PATH", Value: VMRootfsPath},
 			{Name: "KERNEL_PATH", Value: VMKernelPath},
-			{Name: "CPU_COUNT", Value: vmCPUCount},
-			{Name: "MEMORY", Value: vmMemoryMiB},
+			{Name: "CPU_COUNT", Value: strconv.Itoa(size.CPUs)},
+			{Name: "MEMORY", Value: strconv.FormatInt(size.MemoryMiB, 10)},
 			{Name: "GATEWAY_IP", Value: VMGatewayIP},
 			{Name: "VM_IP", Value: VMIP},
 			{Name: "TAP_DEVICE_NAME", Value: VMTapDevice},
@@ -323,7 +335,7 @@ func (rb *ResourceBuilder) buildVSCodeContainer(session *LabSession) corev1.Cont
 }
 
 // buildVolumes creates the volumes for the pod
-func (rb *ResourceBuilder) buildVolumes(sessionID string) []corev1.Volume {
+func (rb *ResourceBuilder) buildVolumes(sessionID string, size vmSize) []corev1.Volume {
 	return []corev1.Volume{
 		{
 			Name: "vm-data",
@@ -351,7 +363,7 @@ func (rb *ResourceBuilder) buildVolumes(sessionID string) []corev1.Volume {
 			// Holds the rootfs; must be larger than the disk it is grown to.
 			Name: "vm-kernels",
 			VolumeSource: corev1.VolumeSource{
-				EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: resourcePtr(vmKernelsSizeLimit(rb.diskSize()))},
+				EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: resourcePtr(vmKernelsSizeLimit(size.Disk))},
 			},
 		},
 	}
@@ -469,30 +481,39 @@ func (rb *ResourceBuilder) storageClassName() *string {
 	return stringPtr(rb.settings.StorageClass)
 }
 
-// getResourceLimits returns resource limits with defaults and max enforcement
-func (rb *ResourceBuilder) getResourceLimits(requested ResourceConfig) ResourceConfig {
-	limits := ResourceConfig{
-		Memory: "4Gi",
-		CPU:    "2",
-	}
+// vmSize is the VM a session runs: vCPUs and memory for Firecracker, and the disk the rootfs is
+// grown to.
+type vmSize struct {
+	CPUs      int
+	MemoryMiB int64
+	Disk      resource.Quantity
+}
 
-	// Apply requested limits
-	if requested.Memory != "" {
-		limits.Memory = requested.Memory
-	}
-	if requested.CPU != "" {
-		limits.CPU = requested.CPU
-	}
+// containerMemory is what the VM container reserves and is limited to: the VM's memory plus
+// Firecracker's own overhead.
+func (s vmSize) containerMemory() resource.Quantity {
+	return *resource.NewQuantity((s.MemoryMiB+firecrackerOverheadMiB)<<20, resource.BinarySI)
+}
 
-	// Enforce maximum limits
-	if memoryGB := parseMemoryGi(limits.Memory); memoryGB > 16 {
-		limits.Memory = "16Gi"
+// vmSize reads the session's VM size from spec.resources (set from the lab by the API): cpu is
+// the vCPU count (rounded up), memory the VM's memory, storage its disk. Missing or unparsable
+// values fall back to the defaults (the disk to the controller's --vm-disk-size); CPU and
+// memory are kept within [1, maxVMCPUs] and [minVMMemoryMiB, maxVMMemoryMiB].
+func (rb *ResourceBuilder) vmSize(session *LabSession) vmSize {
+	size := vmSize{CPUs: defaultVMCPUs, MemoryMiB: defaultVMMemoryMiB, Disk: rb.diskSize()}
+	r := session.Spec.Resources
+	if q, err := resource.ParseQuantity(r.CPU); err == nil && q.Sign() > 0 {
+		size.CPUs = int((q.MilliValue() + 999) / 1000)
 	}
-	if cpuCores := parseCPU(limits.CPU); cpuCores > 8 {
-		limits.CPU = "8"
+	if q, err := resource.ParseQuantity(r.Memory); err == nil && q.Sign() > 0 {
+		size.MemoryMiB = q.Value() >> 20
 	}
-
-	return limits
+	if q, err := resource.ParseQuantity(r.Storage); err == nil && q.Sign() > 0 {
+		size.Disk = q
+	}
+	size.CPUs = min(max(size.CPUs, 1), maxVMCPUs)
+	size.MemoryMiB = min(max(size.MemoryMiB, minVMMemoryMiB), maxVMMemoryMiB)
+	return size
 }
 
 // Helper functions
@@ -557,38 +578,4 @@ func resourcePtr(q resource.Quantity) *resource.Quantity {
 
 func stringPtr(s string) *string {
 	return &s
-}
-
-func getMemoryRequest(limit string) string {
-	// Return 75% of limit as request
-	if strings.HasSuffix(limit, "Gi") {
-		if val, err := strconv.Atoi(strings.TrimSuffix(limit, "Gi")); err == nil {
-			return fmt.Sprintf("%dGi", val*3/4)
-		}
-	}
-	return "3Gi" // default
-}
-
-func getCPURequest(limit string) string {
-	// Return 50% of limit as request
-	if val, err := strconv.Atoi(limit); err == nil {
-		return fmt.Sprintf("%d", val/2)
-	}
-	return "1" // default
-}
-
-func parseMemoryGi(memory string) int {
-	if strings.HasSuffix(memory, "Gi") {
-		if val, err := strconv.Atoi(strings.TrimSuffix(memory, "Gi")); err == nil {
-			return val
-		}
-	}
-	return 4 // default
-}
-
-func parseCPU(cpu string) int {
-	if val, err := strconv.Atoi(cpu); err == nil {
-		return val
-	}
-	return 2 // default
 }

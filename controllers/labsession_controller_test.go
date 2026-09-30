@@ -27,7 +27,7 @@ func TestBuildPodDelegatesToSharedBuilder(t *testing.T) {
 		name         string
 		spec         map[string]interface{}
 		wantErr      bool
-		wantMemLimit string
+		wantMemLimit string // the VM's memory (the legacy caps apply) plus 128Mi for Firecracker
 		wantPassword string
 	}{
 		{
@@ -85,8 +85,11 @@ func TestBuildPodDelegatesToSharedBuilder(t *testing.T) {
 			if vm.Image != "dozlab-firecracker:test" {
 				t.Errorf("vm image = %q", vm.Image)
 			}
-			if got := vm.Resources.Limits[corev1.ResourceMemory]; got.Cmp(resource.MustParse(tt.wantMemLimit)) != 0 {
-				t.Errorf("vm memory limit = %s, want %s", got.String(), tt.wantMemLimit)
+			// The legacy caps set the VM's memory; the container adds 128Mi for Firecracker.
+			want := resource.MustParse(tt.wantMemLimit)
+			want.Add(resource.MustParse("128Mi"))
+			if got := vm.Resources.Limits[corev1.ResourceMemory]; got.Cmp(want) != 0 {
+				t.Errorf("vm memory limit = %s, want %s", got.String(), want.String())
 			}
 			for _, e := range code.Env {
 				if e.Name == "PASSWORD" && e.Value != tt.wantPassword {
