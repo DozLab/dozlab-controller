@@ -62,7 +62,7 @@ func TestBuildPod(t *testing.T) {
 			spec:          LabSessionSpec{UserID: "u1", SessionID: "s1"},
 			wantVMImage:   "dozlab-firecracker:test",
 			wantTermImage: "dozlab-terminal:test",
-			wantCodeImage: "codercom/code-server:latest",
+			wantCodeImage: VSCodeImage,
 			wantPassword:  "changeme",
 			wantMemLimit:  "4Gi",
 			wantCPULimit:  "2",
@@ -100,7 +100,7 @@ func TestBuildPod(t *testing.T) {
 			},
 			wantVMImage:   "dozlab-firecracker:test",
 			wantTermImage: "dozlab-terminal:test",
-			wantCodeImage: "codercom/code-server:latest",
+			wantCodeImage: VSCodeImage,
 			wantPassword:  "changeme",
 			wantMemLimit:  "16Gi",
 			wantCPULimit:  "8",
@@ -164,6 +164,15 @@ func TestBuildPod(t *testing.T) {
 			code := findContainer(t, pod.Spec.Containers, "code-server")
 			if code.Image != tt.wantCodeImage {
 				t.Errorf("code-server image = %q, want %q", code.Image, tt.wantCodeImage)
+			}
+			netSetup := findContainer(t, pod.Spec.InitContainers, "network-setup")
+			if netSetup.Image != NetworkSetupImage {
+				t.Errorf("network-setup image = %q, want %q", netSetup.Image, NetworkSetupImage)
+			}
+			for _, c := range []corev1.Container{netSetup, code} {
+				if c.ImagePullPolicy != corev1.PullIfNotPresent {
+					t.Errorf("%s pull policy = %q, want IfNotPresent", c.Name, c.ImagePullPolicy)
+				}
 			}
 			if v, _ := envValue(code, "PASSWORD"); v != tt.wantPassword {
 				t.Errorf("code-server PASSWORD = %q, want %q", v, tt.wantPassword)

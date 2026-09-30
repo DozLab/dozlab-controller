@@ -26,6 +26,11 @@ const (
 	vmMemoryMiB     = "1024"
 	ipForwardSysctl = "net.ipv4.ip_forward"
 
+	// Public images are pinned by digest and pulled IfNotPresent, so a session
+	// never waits on (or fails at) a registry lookup once the node has them.
+	NetworkSetupImage = "busybox:1.38.0@sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e"
+	VSCodeImage       = "codercom/code-server:4.139.1@sha256:0c067c3cf09ed1830ce282387826be8feefef8a5828f462791c2df3f1007ee17"
+
 	// KVMResource and TUNResource are the device plugin resources that give
 	// the VM container /dev/kvm and /dev/net/tun without privileged mode.
 	KVMResource corev1.ResourceName = "dozlab.io/kvm"
@@ -103,9 +108,10 @@ func (rb *ResourceBuilder) buildRootfsInitContainer(session *LabSession) corev1.
 // buildNetworkSetupContainer writes the VM network settings for the sidecars
 func (rb *ResourceBuilder) buildNetworkSetupContainer() corev1.Container {
 	return corev1.Container{
-		Name:    "network-setup",
-		Image:   "busybox:latest",
-		Command: []string{"sh", "-c"},
+		Name:            "network-setup",
+		Image:           NetworkSetupImage,
+		ImagePullPolicy: corev1.PullIfNotPresent,
+		Command:         []string{"sh", "-c"},
 		Args: []string{fmt.Sprintf(
 			`printf "GATEWAY_IP=%s\nVM_IP=%s\nPOD_IP=%%s\nTAP_DEVICE=%s\n" "$(hostname -i)" > /shared/network-config; cat /shared/network-config`,
 			VMGatewayIP, VMIP, VMTapDevice)},
@@ -251,7 +257,7 @@ func (rb *ResourceBuilder) buildTerminalContainer(session *LabSession) corev1.Co
 // buildVSCodeContainer creates the VS Code sidecar container
 func (rb *ResourceBuilder) buildVSCodeContainer(session *LabSession) corev1.Container {
 	sessionID := session.Spec.SessionID
-	vscodeImage := "codercom/code-server:latest"
+	vscodeImage := VSCodeImage
 	if session.Spec.CustomImages.VSCodeImage != "" {
 		vscodeImage = session.Spec.CustomImages.VSCodeImage
 	}
@@ -262,8 +268,9 @@ func (rb *ResourceBuilder) buildVSCodeContainer(session *LabSession) corev1.Cont
 	}
 
 	return corev1.Container{
-		Name:  "code-server",
-		Image: vscodeImage,
+		Name:            "code-server",
+		Image:           vscodeImage,
+		ImagePullPolicy: corev1.PullIfNotPresent,
 		Ports: []corev1.ContainerPort{
 			{ContainerPort: 8080, Name: "vscode"},
 		},
