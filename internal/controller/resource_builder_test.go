@@ -72,10 +72,10 @@ func TestBuildPod(t *testing.T) {
 			wantTermImage: "dozlab-terminal:test",
 			wantCodeImage: VSCodeImage,
 			wantPassword:  "changeme",
-			wantMemLimit:  "4Gi",
-			wantCPULimit:  "2",
-			wantMemReq:    "3Gi",
-			wantCPUReq:    "1",
+			wantMemLimit:  "1152Mi", // default VM: 1024 MiB + 128 MiB Firecracker overhead
+			wantCPULimit:  "1",
+			wantMemReq:    "1152Mi",
+			wantCPUReq:    "100m",
 		},
 		{
 			name: "password and resources",
@@ -89,10 +89,10 @@ func TestBuildPod(t *testing.T) {
 			wantTermImage: "dozlab-terminal:test",
 			wantCodeImage: VSCodeImage,
 			wantPassword:  "secret",
-			wantMemLimit:  "8Gi",
+			wantMemLimit:  "8320Mi",
 			wantCPULimit:  "4",
-			wantMemReq:    "6Gi",
-			wantCPUReq:    "2",
+			wantMemReq:    "8320Mi",
+			wantCPUReq:    "100m",
 		},
 		{
 			name: "resources above maximum are capped",
@@ -105,10 +105,10 @@ func TestBuildPod(t *testing.T) {
 			wantTermImage: "dozlab-terminal:test",
 			wantCodeImage: VSCodeImage,
 			wantPassword:  "changeme",
-			wantMemLimit:  "16Gi",
+			wantMemLimit:  "16512Mi",
 			wantCPULimit:  "8",
-			wantMemReq:    "12Gi",
-			wantCPUReq:    "4",
+			wantMemReq:    "16512Mi",
+			wantCPUReq:    "100m",
 		},
 	}
 
@@ -326,117 +326,60 @@ func checkQuantity(t *testing.T, what string, got resource.Quantity, want string
 	}
 }
 
-func TestGetResourceLimits(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    ResourceConfig
-		expected ResourceConfig
-	}{
-		{"defaults", ResourceConfig{}, ResourceConfig{Memory: "4Gi", CPU: "2"}},
-		{"override memory", ResourceConfig{Memory: "8Gi"}, ResourceConfig{Memory: "8Gi", CPU: "2"}},
-		{"override cpu", ResourceConfig{CPU: "4"}, ResourceConfig{Memory: "4Gi", CPU: "4"}},
-		{"at maximum", ResourceConfig{Memory: "16Gi", CPU: "8"}, ResourceConfig{Memory: "16Gi", CPU: "8"}},
-		{"memory capped", ResourceConfig{Memory: "20Gi"}, ResourceConfig{Memory: "16Gi", CPU: "2"}},
-		{"cpu capped", ResourceConfig{CPU: "10"}, ResourceConfig{Memory: "4Gi", CPU: "8"}},
-	}
-
+func TestVMSize(t *testing.T) {
 	rb := NewResourceBuilder(testSettings)
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := rb.getResourceLimits(tt.input)
-			if result.Memory != tt.expected.Memory || result.CPU != tt.expected.CPU {
-				t.Errorf("getResourceLimits(%v) = %v; want %v", tt.input, result, tt.expected)
-			}
-		})
-	}
-}
-
-func TestGetMemoryRequest(t *testing.T) {
 	tests := []struct {
-		name     string
-		input    string
-		expected string
+		name      string
+		resources ResourceConfig
+		wantCPUs  int
+		wantMiB   int64
+		wantDisk  string
 	}{
-		{"4Gi", "4Gi", "3Gi"},
-		{"8Gi", "8Gi", "6Gi"},
-		{"non-Gi falls back", "100Mi", "3Gi"},
+		{"unset keeps the old fixed size", ResourceConfig{}, 1, 1024, testSettings.VMDiskSize},
+		{"vm lab baseline", ResourceConfig{CPU: "1", Memory: "512Mi", Storage: "1Gi"}, 1, 512, "1Gi"},
+		{"k8s lab", ResourceConfig{CPU: "2", Memory: "2Gi", Storage: "4Gi"}, 2, 2048, "4Gi"},
+		{"millicores round up", ResourceConfig{CPU: "1500m"}, 2, 1024, testSettings.VMDiskSize},
+		{"above maximum is capped", ResourceConfig{CPU: "32", Memory: "64Gi"}, maxVMCPUs, maxVMMemoryMiB, testSettings.VMDiskSize},
+		{"below minimum is raised", ResourceConfig{CPU: "100m", Memory: "16Mi"}, 1, minVMMemoryMiB, testSettings.VMDiskSize},
+		{"unparsable falls back", ResourceConfig{CPU: "lots", Memory: "big", Storage: "huge"}, 1, 1024, testSettings.VMDiskSize},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := getMemoryRequest(tt.input)
-			if result != tt.expected {
-				t.Errorf("getMemoryRequest(%v) = %v; want %v", tt.input, result, tt.expected)
+			got := rb.vmSize(newSession(LabSessionSpec{SessionID: "s", Resources: tt.resources}))
+			if got.CPUs != tt.wantCPUs || got.MemoryMiB != tt.wantMiB {
+				t.Errorf("vmSize(%+v) = %d vCPUs, %d MiB; want %d, %d", tt.resources, got.CPUs, got.MemoryMiB, tt.wantCPUs, tt.wantMiB)
 			}
+			checkQuantity(t, "disk", got.Disk, tt.wantDisk)
 		})
 	}
 }
 
-func TestGetCPURequest(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    string
-		expected string
-	}{
-		{"2 cores", "2", "1"},
-		{"8 cores", "8", "4"},
-		{"millicores fall back", "500m", "1"},
+// TestBuildPodVMSize checks that the session's size reaches Firecracker, the init container
+// (the disk the rootfs is grown to) and the vm-kernels volume.
+func TestBuildPodVMSize(t *testing.T) {
+	pod := NewResourceBuilder(testSettings).BuildPod(newSession(LabSessionSpec{
+		SessionID: "k8s",
+		Resources: ResourceConfig{CPU: "2", Memory: "2Gi", Storage: "4Gi"},
+	}))
+	vm := findContainer(t, pod.Spec.Containers, "firecracker-vm")
+	for k, want := range map[string]string{"CPU_COUNT": "2", "MEMORY": "2048"} {
+		if got, _ := envValue(vm, k); got != want {
+			t.Errorf("vm %s = %q, want %q", k, got, want)
+		}
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := getCPURequest(tt.input)
-			if result != tt.expected {
-				t.Errorf("getCPURequest(%v) = %v; want %v", tt.input, result, tt.expected)
-			}
-		})
+	checkQuantity(t, "vm memory request", vm.Resources.Requests[corev1.ResourceMemory], "2176Mi")
+	checkQuantity(t, "vm cpu limit", vm.Resources.Limits[corev1.ResourceCPU], "2")
+	init := findContainer(t, pod.Spec.InitContainers, "init-rootfs")
+	if got, _ := envValue(init, "IMAGE_SIZE"); got != "4096M" {
+		t.Errorf("init IMAGE_SIZE = %q, want %q", got, "4096M")
 	}
-}
-
-func TestParseMemoryGi(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    string
-		expected int
-	}{
-		{"4Gi", "4Gi", 4},
-		{"16Gi", "16Gi", 16},
-		{"non-Gi falls back", "512Mi", 4},
-		{"empty falls back", "", 4},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := parseMemoryGi(tt.input)
-			if result != tt.expected {
-				t.Errorf("parseMemoryGi(%v) = %v; want %v", tt.input, result, tt.expected)
-			}
-		})
+	for _, v := range pod.Spec.Volumes {
+		if v.Name == "vm-kernels" {
+			checkQuantity(t, "vm-kernels size limit", *v.EmptyDir.SizeLimit, "8Gi")
+		}
 	}
 }
 
-func TestParseCPU(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    string
-		expected int
-	}{
-		{"2 cores", "2", 2},
-		{"millicores fall back", "500m", 2},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := parseCPU(tt.input)
-			if result != tt.expected {
-				t.Errorf("parseCPU(%v) = %v; want %v", tt.input, result, tt.expected)
-			}
-		})
-	}
-}
-
-// TestBuildPodMatchesReference checks the fields that reference/lab-pod-working.yaml
-// marks as required to boot a Firecracker VM.
 func TestBuildPodMatchesReference(t *testing.T) {
 	pod := NewResourceBuilder(testSettings).BuildPod(newSession(LabSessionSpec{
 		UserID:    "u1",
