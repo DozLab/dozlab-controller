@@ -217,6 +217,7 @@ func (r *LabSessionReconciler) reconcileCreating(ctx context.Context, session *L
 		session.Status.Message = "Lab session is running"
 		session.Status.PodIP = podIP
 		session.Status.VMIP = calculateVMIP(podIP)
+		session.Status.Usage = usageOf(pod, r.ResourceBuilder.BuildPVCs(session))
 
 		// Update endpoints
 		if err := r.updateEndpoints(ctx, session); err != nil {
@@ -354,6 +355,7 @@ func (r *LabSessionReconciler) reconcileDelete(ctx context.Context, session *Lab
 	// Update status to Terminating
 	session.Status.Phase = SessionPhaseTerminating
 	session.Status.Message = "Cleaning up lab session resources"
+	session.Status.Usage = LabSessionUsage{} // the pod and the volume claims go with the session
 	if err := r.Status().Update(ctx, session); errors.IsNotFound(err) {
 		// A queued reconcile read the session from the cache after an earlier
 		// one had already removed the finalizer; deletion is done.
@@ -577,6 +579,9 @@ func (r *LabSessionReconciler) updateStatusFailed(ctx context.Context, session *
 	if err != nil {
 		session.Status.Reason = err.Error()
 	}
+	// A failed session may still have its pod (not ready for too long), which still holds its
+	// CPU and memory; report what is really there.
+	session.Status.Usage = usageOf(r.sessionPod(ctx, session), r.ResourceBuilder.BuildPVCs(session))
 
 	r.setCondition(session, ConditionTypeReady, metav1.ConditionFalse, "Failed", message)
 
