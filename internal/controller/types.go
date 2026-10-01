@@ -78,6 +78,24 @@ type LabSessionStatus struct {
 	LastTransitionTime *metav1.Time `json:"lastTransitionTime,omitempty"`
 	// ObservedGeneration reflects the generation observed by the controller
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+	// Usage is what the session's VM holds in the cluster right now
+	Usage LabSessionUsage `json:"usage,omitempty"`
+}
+
+// LabSessionUsage is what a session's VM holds in the cluster: CPU and memory while its pod
+// runs, and storage for as long as the session exists. The API shows it to the instructor
+// per VM and summed per lab.
+type LabSessionUsage struct {
+	// Running is true while the VM's pod exists and hasn't finished, so it holds its CPU and
+	// memory. It can be true for a Failed session whose pod is still there.
+	Running bool `json:"running"`
+	// CPURequest and MemoryRequest are what the pod's containers reserve, summed (Kubernetes
+	// quantities, e.g. "850m" and "1920Mi"). Empty when the pod isn't running.
+	CPURequest    string `json:"cpuRequest,omitempty"`
+	MemoryRequest string `json:"memoryRequest,omitempty"`
+	// Storage is the total of the session's volume claims (e.g. "6Gi"). The claims belong to
+	// the session, so this is held until the session is deleted.
+	Storage string `json:"storage,omitempty"`
 }
 
 // SessionPhase defines the phase of a lab session

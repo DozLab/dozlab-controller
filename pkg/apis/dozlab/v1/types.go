@@ -52,6 +52,16 @@ type LabSessionStatus struct {
 	CreatedAt   *metav1.Time          `json:"createdAt,omitempty"`
 	ExpiresAt   *metav1.Time          `json:"expiresAt,omitempty"`
 	Conditions  []LabSessionCondition `json:"conditions,omitempty"`
+	Usage       LabSessionUsage       `json:"usage,omitempty"`
+}
+
+// LabSessionUsage is what a session's VM holds in the cluster: CPU and memory while its pod
+// runs, and storage until the session is deleted (see internal/controller).
+type LabSessionUsage struct {
+	Running       bool   `json:"running"`
+	CPURequest    string `json:"cpuRequest,omitempty"`
+	MemoryRequest string `json:"memoryRequest,omitempty"`
+	Storage       string `json:"storage,omitempty"`
 }
 
 // LabSessionPhase represents the current phase of the lab session
