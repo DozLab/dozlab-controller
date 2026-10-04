@@ -222,14 +222,13 @@ In `deploy/deployment.yaml` the URL comes from the optional Secret `dozlab-contr
 ### Project Structure
 
 ```
-├── controllers/          # Controller reconciliation logic
-│   ├── labsession_controller.go
-│   └── types.go
-├── deploy/              # Kubernetes manifests
-│   └── deployment.yaml
-├── main.go             # Controller entry point
-├── go.mod              # Go modules
-└── Makefile           # Build and deployment commands
+├── cmd/controller/        # Controller entry point (main.go), built by the Dockerfile
+├── internal/controller/   # Reconciler, pod/PVC/Service/Ingress builders, tests
+├── pkg/                   # API types and shared helpers (logging, metrics, tracing)
+├── deploy/                # Kubernetes manifests
+│   ├── deployment.yaml
+│   └── session-ingress-middleware.yaml
+└── go.mod                 # Go modules
 ```
 
 ### Building
