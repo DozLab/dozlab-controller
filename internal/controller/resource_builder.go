@@ -192,7 +192,6 @@ func (rb *ResourceBuilder) buildVMContainer(session *LabSession, size vmSize) co
 		},
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: "vm-kernels", MountPath: VMKernelsPath},
-			{Name: "vm-data", MountPath: "/vm-data"},
 			{Name: "shared-config", MountPath: "/shared", ReadOnly: true},
 		},
 	}
@@ -256,7 +255,6 @@ func (rb *ResourceBuilder) buildTerminalContainer(session *LabSession) corev1.Co
 			},
 		},
 		VolumeMounts: []corev1.VolumeMount{
-			{Name: "vm-data", MountPath: "/vm-data", ReadOnly: true},
 			{Name: "shared-config", MountPath: "/shared", ReadOnly: true},
 		},
 	}

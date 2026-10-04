@@ -212,6 +212,26 @@ func TestBuildPodVolumeMounts(t *testing.T) {
 	}
 }
 
+// vm-data backs code-server's /workspace and nothing else: start-firecracker.sh attaches only
+// the rootfs drive to the VM, and the terminal sidecar reads /shared and the SSH key, never
+// /vm-data. A mount anywhere else would be dead weight on the PVC.
+func TestVMDataMountedOnlyByCodeServer(t *testing.T) {
+	pod := NewResourceBuilder(testSettings).BuildPod(newSession(LabSessionSpec{UserID: "u", SessionID: "s"}))
+
+	all := append(append([]corev1.Container{}, pod.Spec.InitContainers...), pod.Spec.Containers...)
+	var mountedBy []string
+	for _, c := range all {
+		for _, m := range c.VolumeMounts {
+			if m.Name == "vm-data" {
+				mountedBy = append(mountedBy, c.Name)
+			}
+		}
+	}
+	if len(mountedBy) != 1 || mountedBy[0] != "code-server" {
+		t.Errorf("vm-data mounted by %v, want only [code-server]", mountedBy)
+	}
+}
+
 func TestBuildService(t *testing.T) {
 	session := newSession(LabSessionSpec{UserID: "u1", SessionID: "s1"})
 	svc := NewResourceBuilder(testSettings).BuildService(session)
