@@ -19,58 +19,62 @@ Kubernetes controller for managing Dozlab custom resources and lab orchestration
 
 ## Architecture
 
-The controller follows the Kubernetes operator pattern:
+The controller follows the Kubernetes operator pattern: dozlab-api creates a `LabSession`, and
+the controller turns it into one lab session pod plus the objects around it.
 
-```
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   API Server    │────│   Controller    │────│  Lab Resources  │
-│                 │    │                 │    │                 │
-│ • LabSession    │    │ • Reconcile     │    │ • Pods          │
-│   CRDs          │    │ • Watch Events  │    │ • Services      │
-│ • Events        │    │ • Manage State  │    │ • Volumes       │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/lab-pod-exploded-dark.png">
+  <img alt="Exploded view of the lab session pod the controller builds: its four volumes at the bottom, and above them the Firecracker microVM, the terminal sidecar and code-server side by side" src="docs/diagrams/lab-pod-exploded.png">
+</picture>
+
+The pod runs two init containers (`init-rootfs` writes the VM's root filesystem into
+`vm-kernels`, `network-setup` writes the VM's addresses to `shared-config`), then
+`firecracker-vm`, `terminal-sidecar` (port 8081) and `code-server` (port 8080). `vm-data` and
+`vscode-data` are a PVC each; `vm-kernels` and `shared-config` are emptyDirs.
 
 ## Custom Resources
 
 ### LabSession CRD
 
-Defines lab environment specifications:
+What dozlab-api creates when a user starts a lab (`spec.resources` is the VM's size, from the lab):
 
 ```yaml
 apiVersion: dozlab.io/v1
 kind: LabSession
 metadata:
-  name: session-123
+  name: session-<session id>
+  namespace: default
+  labels:
+    user-id: "<user id>"
+    session-id: "<session id>"
 spec:
-  labId: "lab-golang-basics"
-  userId: "user-456"
-  image: "dozlab/golang-lab:latest"
+  userId: "<user id>"
+  sessionId: "<session id>"
   resources:
-    requests:
-      cpu: "500m"
-      memory: "1Gi"
-    limits:
-      cpu: "2"
-      memory: "4Gi"
-  networking:
-    ports:
-      - port: 8080
-        protocol: TCP
-      - port: 22
-        protocol: TCP
+    cpu: "1"          # vCPUs
+    memory: "512Mi"   # VM memory
+    storage: "1Gi"    # VM disk
+  config:
+    vsCodePassword: "..."
+    enableTerminal: true
+    enableVSCode: true
+    enableSSH: true
+  customImages:
+    initImage: "<the lab's init image>"   # only when the lab sets one
 ```
 
 ## Controller Logic
 
-The controller reconciles LabSession resources by:
+The reconciler (`internal/controller/reconciler.go`) moves a session through its phases:
 
-1. **Validation**: Ensures resource specifications are valid
-2. **Pod Creation**: Creates multi-container pods with sidecars
-3. **Service Creation**: Exposes lab services for external access
-4. **Volume Management**: Sets up persistent and shared volumes
-5. **Status Updates**: Maintains resource status and conditions
-6. **Cleanup**: Removes resources when sessions end
+1. **Pending → Creating**: records the start time.
+2. **Creating**: creates the PVCs, the SSH-key Secret, the pod, the Service and the Ingress,
+   all owned by the `LabSession`. A pod that fails sends the session to **Failed**.
+3. **Running**: once the pod is ready, records the pod IP, the VM IP, resource usage and the
+   terminal and vscode URLs.
+4. **Terminating**: on delete; the owned objects go with the `LabSession`.
+
+Each new phase is published to RabbitMQ (see "Phase change events" below).
 
 ## Getting Started
 
