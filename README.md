@@ -138,6 +138,7 @@ at startup if any is missing.
 | `--ingress-class` | `DOZLAB_INGRESS_CLASS` | `traefik` | IngressClass of each session's Ingress |
 | `--ingress-middleware` | `DOZLAB_INGRESS_MIDDLEWARE` | none | Traefik Middleware that strips `/sessions/<id>/<app>`, as `<namespace>-<name>@kubernetescrd` |
 | `--public-base-url` | `DOZLAB_PUBLIC_BASE_URL` | none (paths only) | Public URL of the ingress controller; the session endpoints are built on it |
+| `--image-pull-secrets` | `DOZLAB_IMAGE_PULL_SECRETS` | none | Comma-separated Secrets in the sessions' namespace that lab pods pull images with (e.g. `ghcr-pull` for the private `dozlab-terminal`) |
 
 A LabSession's `customImages.initImage` is its lab's init image: the API sets it from the lab
 (`labs.init_image`), so each session boots its lab's rootfs (`dozlab-init-<lab>` from

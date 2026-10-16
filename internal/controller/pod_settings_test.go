@@ -1,6 +1,8 @@
 package controller
 
 import (
+	"flag"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -29,6 +31,8 @@ func TestPodSettingsValidate(t *testing.T) {
 		{"https PublicBaseURL", func(s *PodSettings) { s.PublicBaseURL = "https://lab.example.ts.net" }, ""},
 		{"PublicBaseURL without scheme", func(s *PodSettings) { s.PublicBaseURL = "lab.example.ts.net" }, "must be an http(s) URL"},
 		{"PublicBaseURL with other scheme", func(s *PodSettings) { s.PublicBaseURL = "ftp://lab.example" }, "must be an http(s) URL"},
+		{"ImagePullSecrets", func(s *PodSettings) { s.ImagePullSecrets = []string{"ghcr-pull", "other.pull"} }, ""},
+		{"ImagePullSecrets with bad name", func(s *PodSettings) { s.ImagePullSecrets = []string{"GHCR_pull"} }, "not a valid Secret name"},
 		{"all three images missing", func(s *PodSettings) {
 			s.VMImage = ""
 			s.InitImage = ""
@@ -49,6 +53,35 @@ func TestPodSettingsValidate(t *testing.T) {
 				}
 			} else if err != nil {
 				t.Errorf("expected no error, got %q", err)
+			}
+		})
+	}
+}
+
+func TestPodSettingsImagePullSecretsFlag(t *testing.T) {
+	testCases := []struct {
+		name string
+		env  string
+		args []string
+		want []string
+	}{
+		{"unset", "", nil, nil},
+		{"env", "ghcr-pull", nil, []string{"ghcr-pull"}},
+		{"env list with blanks", " ghcr-pull, ,other ", nil, []string{"ghcr-pull", "other"}},
+		{"flag overrides env", "ghcr-pull", []string{"--image-pull-secrets=a,b"}, []string{"a", "b"}},
+		{"empty flag clears env", "ghcr-pull", []string{"--image-pull-secrets="}, nil},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("DOZLAB_IMAGE_PULL_SECRETS", tc.env)
+			var s PodSettings
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			s.BindFlags(fs)
+			if err := fs.Parse(tc.args); err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(s.ImagePullSecrets, tc.want) {
+				t.Errorf("ImagePullSecrets = %q, want %q", s.ImagePullSecrets, tc.want)
 			}
 		})
 	}

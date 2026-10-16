@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strings"
 
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/util/validation"
 )
 
 // PodSettings holds the controller-wide settings for lab session pods.
@@ -37,6 +39,10 @@ type PodSettings struct {
 	// PublicBaseURL is the public origin that reaches the ingress controller, e.g. the
 	// Tailscale Funnel URL. The session endpoints are built on it; empty gives paths only.
 	PublicBaseURL string
+
+	// ImagePullSecrets names the Secrets in the sessions' namespace that lab pods pull their
+	// images with (e.g. ghcr-pull for the private dozlab-terminal image). Empty sets none.
+	ImagePullSecrets []string
 }
 
 // BindFlags registers the settings as flags. Each flag defaults to its
@@ -60,6 +66,10 @@ func (s *PodSettings) BindFlags(fs *flag.FlagSet) {
 		"Traefik Middleware that strips the session path prefix, as <namespace>-<name>@kubernetescrd (env DOZLAB_INGRESS_MIDDLEWARE).")
 	fs.StringVar(&s.PublicBaseURL, "public-base-url", os.Getenv("DOZLAB_PUBLIC_BASE_URL"),
 		"Public URL of the ingress controller, used in session endpoints (env DOZLAB_PUBLIC_BASE_URL). Empty gives paths only.")
+	s.ImagePullSecrets = splitList(os.Getenv("DOZLAB_IMAGE_PULL_SECRETS"))
+	fs.Func("image-pull-secrets",
+		"Comma-separated Secrets lab pods pull images with (env DOZLAB_IMAGE_PULL_SECRETS). Empty sets none.",
+		func(v string) error { s.ImagePullSecrets = splitList(v); return nil })
 }
 
 // Validate reports missing or malformed settings.
@@ -87,7 +97,23 @@ func (s PodSettings) Validate() error {
 			errs = append(errs, fmt.Errorf("public base url %q must be an http(s) URL", s.PublicBaseURL))
 		}
 	}
+	for _, name := range s.ImagePullSecrets {
+		if msgs := validation.IsDNS1123Subdomain(name); len(msgs) > 0 {
+			errs = append(errs, fmt.Errorf("image pull secret %q is not a valid Secret name: %s", name, strings.Join(msgs, "; ")))
+		}
+	}
 	return errors.Join(errs...)
+}
+
+// splitList splits a comma-separated list, dropping blanks.
+func splitList(v string) []string {
+	var out []string
+	for _, item := range strings.Split(v, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 func envOr(key, fallback string) string {
