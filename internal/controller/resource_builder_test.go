@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -629,5 +630,21 @@ func TestBuildPodProbes(t *testing.T) {
 				t.Errorf("readiness period = %d, want %d", got, tt.wantReadinessPeriod)
 			}
 		})
+	}
+}
+
+func TestBuildPodImagePullSecrets(t *testing.T) {
+	session := newSession(LabSessionSpec{SessionID: "s1", UserID: "u1"})
+
+	if got := NewResourceBuilder(testSettings).BuildPod(session).Spec.ImagePullSecrets; got != nil {
+		t.Errorf("no secrets configured: ImagePullSecrets = %v, want nil", got)
+	}
+
+	settings := testSettings
+	settings.ImagePullSecrets = []string{"ghcr-pull", "other"}
+	got := NewResourceBuilder(settings).BuildPod(session).Spec.ImagePullSecrets
+	want := []corev1.LocalObjectReference{{Name: "ghcr-pull"}, {Name: "other"}}
+	if !slices.Equal(got, want) {
+		t.Errorf("ImagePullSecrets = %v, want %v", got, want)
 	}
 }

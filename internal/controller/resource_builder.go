@@ -92,11 +92,21 @@ func (rb *ResourceBuilder) BuildPod(session *LabSession) *corev1.Pod {
 				rb.buildTerminalContainer(session),
 				rb.buildVSCodeContainer(session),
 			},
-			Volumes: rb.buildVolumes(sessionID, size),
+			Volumes:          rb.buildVolumes(sessionID, size),
+			ImagePullSecrets: rb.imagePullSecrets(),
 		},
 	}
 
 	return pod
+}
+
+// imagePullSecrets turns the configured Secret names into pod references; nil when none.
+func (rb *ResourceBuilder) imagePullSecrets() []corev1.LocalObjectReference {
+	var refs []corev1.LocalObjectReference
+	for _, name := range rb.settings.ImagePullSecrets {
+		refs = append(refs, corev1.LocalObjectReference{Name: name})
+	}
+	return refs
 }
 
 // buildRootfsInitContainer writes the VM rootfs into the vm-kernels volume, grows it, and
